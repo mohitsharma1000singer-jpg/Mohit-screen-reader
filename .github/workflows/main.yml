@@ -90,6 +90,7 @@ jobs:
 
       - name: Unpack iPhone VoiceOver sound scheme (searches repo for the zip)
         run: |
+          mkdir -p app/src/main/assets/sound_iphone_voiceover
           ZIPFILE=$(find . -maxdepth 4 -iname "*iphone*voice*over*.zip" | head -n 1)
           if [ -n "$ZIPFILE" ]; then
             echo "Found sound scheme zip at: $ZIPFILE"
@@ -101,8 +102,8 @@ jobs:
       - name: Verify required sound files are present (fails loudly instead of shipping a silent app)
         run: |
           MISSING=""
-          for f in focus2.ogg click.ogg ScreenChange.ogg Alert.ogg; do
-            if [ ! -f  "app/src/main/assets/sound_iphone_voiceover/$f" ]; then
+          for f in focus2.ogg click.ogg  ScreenChange.ogg Alert.ogg; do
+            if [ ! -f "app/src/main/assets/sound_iphone_voiceover/$f" ]; then
               MISSING="$MISSING $f"
             fi
           done
