@@ -1,4 +1,4 @@
-@@@BUNDLE version=13
+@@@BUNDLE version=15
 @@@FILE app/build.gradle lines=48
 apply plugin: 'com.android.application'
 apply plugin: 'kotlin-android'
@@ -48,11 +48,12 @@ android {
 dependencies {
     implementation "org.jetbrains.kotlin:kotlin-stdlib:1.9.24"
 }
-@@@FILE app/src/main/AndroidManifest.xml lines=90
+@@@FILE app/src/main/AndroidManifest.xml lines=96
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
 
     <queries>
@@ -108,6 +109,11 @@ dependencies {
         <activity
             android:name=".AutoClickEditActivity"
             android:exported="false" />
+
+        <activity
+            android:name=".MicPermissionActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 
         <activity
             android:name=".GestureSettingsActivity"
@@ -554,7 +560,7 @@ class GamingAppsActivity : Activity() {
         status.text = "Tick the apps that should use gaming mode. Apps detected as games are already ticked; untick one to turn it off."
     }
 }
-@@@FILE app/src/main/java/com/mohit/screenreader/GestureConfig.kt lines=98
+@@@FILE app/src/main/java/com/mohit/screenreader/GestureConfig.kt lines=99
 package com.mohit.screenreader
 
 import android.content.SharedPreferences
@@ -607,6 +613,7 @@ object GestureConfig {
         "clear_edit" to "Clear edit box",
         "describe_screen" to "AI: Describe screen",
         "describe_image" to "AI: Describe image",
+        "voice_typing" to "AI: Voice typing",
         "scroll_forward" to "Scroll list forward",
         "scroll_backward" to "Scroll list backward",
         "repeat" to "Repeat last spoken text",
@@ -790,13 +797,44 @@ class MainActivity : android.app.Activity() {
         }
     }
 }
-@@@FILE app/src/main/java/com/mohit/screenreader/MyScreenReaderService.kt lines=2316
+@@@FILE app/src/main/java/com/mohit/screenreader/MicPermissionActivity.kt lines=24
+package com.mohit.screenreader
+
+import android.Manifest
+import android.app.Activity
+import android.content.pm.PackageManager
+import android.os.Bundle
+
+// Opened by the screen reader service when voice typing needs the microphone permission.
+class MicPermissionActivity : Activity() {
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            finish()
+            return
+        }
+        requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 1)
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        finish()
+    }
+}
+@@@FILE app/src/main/java/com/mohit/screenreader/MyScreenReaderService.kt lines=2724
 package com.mohit.screenreader
 
 import android.accessibilityservice.AccessibilityService
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.Manifest
 import android.accessibilityservice.AccessibilityServiceInfo
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.media.AudioFormat
+import android.media.AudioRecord
+import android.media.MediaRecorder
 import android.content.Context
 import android.content.pm.ApplicationInfo
 import android.content.SharedPreferences
@@ -822,7 +860,9 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.text.BreakIterator
 import java.text.Normalizer
+import java.util.LinkedList
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -867,7 +907,7 @@ class MyScreenReaderService : AccessibilityService() {
     // ---- AI (Gemini) ----
     private val aiExecutor = Executors.newSingleThreadExecutor()
     private var aiBusy = false
-    private val aiLabels = listOf("Describe screen", "Describe image", "Back")
+    private val aiLabels = listOf("Describe screen", "Describe image", "Voice typing", "Back")
     private var aiIndex = 0
 
     // ---- Auto focus on new screens ----
@@ -888,7 +928,7 @@ class MyScreenReaderService : AccessibilityService() {
     private var sliderWatchUntil = 0L
 
     // ---- Screen Reader Menu state (opened with swipe down-then-right) ----
-    private enum class Mode { NORMAL, MENU, UNIT_CHOOSER, ITEM_SELECT, AI_MENU, EXT_MENU }
+    private enum class Mode { NORMAL, MENU, UNIT_CHOOSER, ITEM_SELECT, AI_MENU, EXT_MENU, VOICE_MENU }
     private enum class SplitKind { CHAR, WORD, LINE, PARAGRAPH }
 
     private var mode = Mode.NORMAL
@@ -912,6 +952,24 @@ class MyScreenReaderService : AccessibilityService() {
     // ---- Extensions menu ----
     private var extIds: List<String> = emptyList()
     private var extIndex = 0
+
+    // ---- AI voice typing ----
+    private val voiceLanguages = listOf(
+        "Hindi" to "hi", "English" to "en", "Urdu" to "ur", "Punjabi" to "pa", "Marathi" to "mr",
+        "Gujarati" to "gu", "Bengali" to "bn", "Tamil" to "ta", "Telugu" to "te", "Kannada" to "kn",
+        "Malayalam" to "ml", "Odia" to "or", "Assamese" to "as", "Nepali" to "ne",
+        "Spanish" to "es", "French" to "fr", "Arabic" to "ar", "German" to "de"
+    )
+    private var voiceLabels: List<String> = emptyList()
+    private var voiceIds: List<String> = emptyList()
+    private var voiceIndex = 0
+    private var voiceActive = false
+    @Volatile private var voiceStopRequested = false
+    private var voiceCaptureDone = true
+    private val voicePending = AtomicInteger(0)
+    private val voiceTyped = StringBuilder()
+    private var voiceLastError: String? = null
+    private val voiceExecutor = Executors.newSingleThreadExecutor()
     private var macroRunning = false
     private val youtubePackage = "com.google.android.youtube"
 
@@ -1094,6 +1152,7 @@ class MyScreenReaderService : AccessibilityService() {
             }
             AccessibilityEvent.TYPE_TOUCH_INTERACTION_START -> {
                 touching = true
+                if (voiceActive) stopVoiceTyping()
             }
             AccessibilityEvent.TYPE_TOUCH_INTERACTION_END -> {
                 touching = false
@@ -1359,6 +1418,11 @@ class MyScreenReaderService : AccessibilityService() {
     }
 
     override fun onGesture(gestureId: Int): Boolean {
+        if (voiceActive) {
+            // Any gesture while dictating stops voice typing.
+            stopVoiceTyping()
+            return true
+        }
         if (gestureId == AccessibilityService.GESTURE_DOUBLE_TAP) {
             if (mode == Mode.NORMAL) activateCurrent() else activateModal()
             return true
@@ -1433,6 +1497,7 @@ class MyScreenReaderService : AccessibilityService() {
             "cut" -> quickOp { opCut(it) }
             "paste" -> quickOp { opPaste(it) }
             "clear_edit" -> quickOp { opClear(it) }
+            "voice_typing" -> beginVoiceFlow()
             "describe_screen" -> runAi(false)
             "describe_image" -> {
                 menuTarget = focusedNode ?: nodeList.getOrNull(currentIndex)
@@ -1885,6 +1950,7 @@ class MyScreenReaderService : AccessibilityService() {
             Mode.ITEM_SELECT -> describeSelectEntry(selectIndex)
             Mode.AI_MENU -> aiLabels[aiIndex]
             Mode.EXT_MENU -> extLabel(extIds.getOrNull(extIndex) ?: "back")
+            Mode.VOICE_MENU -> voiceLabels.getOrElse(voiceIndex) { "" }
             Mode.NORMAL -> ""
         }
         speak("Menu is open. Swipe left or right to change, double tap to choose. Now: " + current)
@@ -1922,6 +1988,11 @@ class MyScreenReaderService : AccessibilityService() {
                 playSound(soundFocus)
                 speak("Menu. " + menuLabels[menuIndex])
             }
+            Mode.VOICE_MENU -> {
+                mode = Mode.AI_MENU
+                playSound(soundFocus)
+                speak("AI menu. " + aiLabels[aiIndex])
+            }
             Mode.AI_MENU, Mode.EXT_MENU -> {
                 mode = Mode.MENU
                 playSound(soundFocus)
@@ -1955,6 +2026,10 @@ class MyScreenReaderService : AccessibilityService() {
                 extIndex = wrap(extIndex + dir, extIds.size)
                 speak(extLabel(extIds[extIndex]))
             }
+            Mode.VOICE_MENU -> {
+                voiceIndex = wrap(voiceIndex + dir, voiceLabels.size)
+                speak(voiceLabels[voiceIndex])
+            }
             Mode.NORMAL -> {}
         }
     }
@@ -1973,9 +2048,11 @@ class MyScreenReaderService : AccessibilityService() {
                 else -> closeMenu()
             }
             Mode.EXT_MENU -> activateExt()
+            Mode.VOICE_MENU -> activateVoiceMenu()
             Mode.AI_MENU -> when (aiIndex) {
                 0 -> runAi(false)
                 1 -> runAi(true)
+                2 -> beginVoiceFlow()
                 else -> goBack()
             }
             Mode.UNIT_CHOOSER -> beginItemSelect(SplitKind.values()[unitIndex])
@@ -2084,6 +2161,7 @@ class MyScreenReaderService : AccessibilityService() {
     }
 
     private fun echoTyping(event: AccessibilityEvent) {
+        if (voiceActive) return
         if (event.isPassword) return
         val now = event.text.firstOrNull()?.toString() ?: return
         val from = event.fromIndex
@@ -2345,6 +2423,366 @@ class MyScreenReaderService : AccessibilityService() {
         handler.postDelayed({ macroStep(steps, idx, last, since) }, 300)
     }
 
+    // ======================= AI voice typing =======================
+
+    private fun beginVoiceFlow() {
+        if (voiceActive) {
+            stopVoiceTyping()
+            return
+        }
+        val name = prefsObj().getString("voice_lang_name", null)
+        if (name == null) openVoiceLanguageMenu() else openVoiceChoiceMenu(name)
+    }
+
+    private fun openVoiceChoiceMenu(name: String) {
+        voiceIds = listOf("continue", "change", "back")
+        voiceLabels = listOf("Continue with " + name, "Change language", "Back")
+        voiceIndex = 0
+        mode = Mode.VOICE_MENU
+        playSound(soundScreenChange)
+        speak("Voice typing. Swipe left or right, double tap to choose. " + voiceLabels[0])
+    }
+
+    private fun openVoiceLanguageMenu() {
+        voiceIds = voiceLanguages.map { "lang:" + it.second } + "back"
+        voiceLabels = voiceLanguages.map { it.first } + "Back"
+        voiceIndex = 0
+        mode = Mode.VOICE_MENU
+        playSound(soundScreenChange)
+        speak("Choose your main language. Swipe left or right, double tap to choose. " + voiceLabels[0])
+    }
+
+    private fun activateVoiceMenu() {
+        val id = voiceIds.getOrNull(voiceIndex) ?: return
+        when {
+            id == "continue" -> startVoiceTyping()
+            id == "change" -> openVoiceLanguageMenu()
+            id.startsWith("lang:") -> {
+                val code = id.substring(5)
+                val name = voiceLanguages.firstOrNull { it.second == code }?.first ?: code
+                prefsObj().edit().putString("voice_lang_name", name).putString("voice_lang_code", code).apply()
+                startVoiceTyping()
+            }
+            else -> goBack()
+        }
+    }
+
+    private fun isKeyboardOpen(): Boolean {
+        return try {
+            windows.any { it.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD }
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    private fun findInputField(): AccessibilityNodeInfo? {
+        try {
+            val a = rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+            if (a != null && a.isEditable) return a
+            for (w in windows) {
+                val f = w.root?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+                if (f != null && f.isEditable) return f
+            }
+        } catch (e: Exception) {
+            // fall through
+        }
+        return null
+    }
+
+    private fun startVoiceTyping() {
+        mode = Mode.NORMAL
+        menuTarget = null
+        val key = prefsObj().getString("gemini_api_key", null)?.trim()
+        if (key.isNullOrEmpty()) {
+            fail("No API key found. Open the screen reader app and choose Add API key first.")
+            return
+        }
+        if (!isKeyboardOpen()) {
+            fail("Keyboard not found. Open the keyboard on the screen first, then start voice typing.")
+            return
+        }
+        if (findInputField() == null) {
+            fail("No text box is selected. Double tap a text box first, then start voice typing.")
+            return
+        }
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            speak("Microphone permission is needed. A permission screen will open. Allow it, then start voice typing again.")
+            try {
+                startActivity(Intent(this, MicPermissionActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            } catch (e: Exception) {
+                fail("Could not open the permission screen.")
+            }
+            return
+        }
+        val lang = prefsObj().getString("voice_lang_name", "Hindi") ?: "Hindi"
+        voiceActive = true
+        voiceStopRequested = false
+        voiceCaptureDone = false
+        voicePending.set(0)
+        voiceTyped.setLength(0)
+        voiceLastError = null
+        speak("Voice typing started. Speak in " + lang + ". It stops after several seconds of silence, or on any touch.")
+        // Start listening only after the announcement has finished, so the microphone does not hear it.
+        afterSpeech {
+            if (!voiceActive || voiceStopRequested) {
+                voiceCaptureDone = true
+                maybeFinishVoice()
+            } else {
+                playSound(soundFocus)
+                Thread { captureLoop(lang) }.start()
+            }
+        }
+    }
+
+    private fun afterSpeech(tries: Int = 0, action: () -> Unit) {
+        handler.postDelayed({
+            val speaking = try {
+                tts?.isSpeaking == true
+            } catch (e: Exception) {
+                false
+            }
+            if (speaking && tries < 60) afterSpeech(tries + 1, action) else handler.postDelayed({ action() }, 300)
+        }, if (tries == 0) 400L else 150L)
+    }
+
+    private fun stopVoiceTyping() {
+        if (!voiceActive) return
+        voiceStopRequested = true
+        playSound(soundActivate)
+    }
+
+    private fun endCapture(error: String?) {
+        handler.post {
+            if (error != null && voiceLastError == null) voiceLastError = error
+            voiceCaptureDone = true
+            maybeFinishVoice()
+        }
+    }
+
+    private fun maybeFinishVoice() {
+        if (!voiceActive || !voiceCaptureDone || voicePending.get() != 0) return
+        voiceActive = false
+        playSound(soundActivate)
+        val err = voiceLastError
+        val typed = voiceTyped.toString().trim()
+        if (err != null) {
+            speak("Voice typing stopped. " + err)
+        } else if (typed.isNotEmpty()) {
+            speak("Voice typing stopped. Typed: " + (if (typed.length > 250) typed.substring(0, 250) else typed))
+        } else {
+            speak("Voice typing stopped. Nothing was typed.")
+        }
+    }
+
+    // Records from the microphone, cuts the speech into pieces at short pauses, sends each piece
+    // for transcription, and stops on its own after about six seconds of silence.
+    private fun captureLoop(langName: String) {
+        val rate = 16000
+        var rec: AudioRecord? = null
+        try {
+            val minBuf = AudioRecord.getMinBufferSize(rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
+            rec = AudioRecord(
+                MediaRecorder.AudioSource.MIC, rate, AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT, maxOf(minBuf, rate)
+            )
+            if (rec.state != AudioRecord.STATE_INITIALIZED) {
+                endCapture("Could not start the microphone.")
+                return
+            }
+            rec.startRecording()
+            val chunk = ShortArray(rate / 10)
+            var seg = ByteArrayOutputStream()
+            val preRoll = LinkedList<ByteArray>()
+            var haveSpeech = false
+            var speechMs = 0
+            var segMs = 0
+            var silenceMs = 0
+            var idleMs = 0
+            var noiseMin = Double.MAX_VALUE
+            var calibrated = 0
+            var threshold = 700.0
+
+            fun flush() {
+                if (speechMs >= 300) submitSegment(seg.toByteArray(), langName)
+                seg = ByteArrayOutputStream()
+                haveSpeech = false
+                speechMs = 0
+                segMs = 0
+                silenceMs = 0
+            }
+
+            while (!voiceStopRequested) {
+                val n = rec.read(chunk, 0, chunk.size)
+                if (n < 0) break
+                if (n == 0) continue
+                var sum = 0.0
+                val bytes = ByteArray(n * 2)
+                for (i in 0 until n) {
+                    val v = chunk[i].toInt()
+                    sum += (v * v).toDouble()
+                    bytes[2 * i] = (v and 0xFF).toByte()
+                    bytes[2 * i + 1] = ((v shr 8) and 0xFF).toByte()
+                }
+                val rms = Math.sqrt(sum / n)
+                if (calibrated < 8) {
+                    if (rms < noiseMin) noiseMin = rms
+                    calibrated++
+                    if (calibrated == 8) threshold = maxOf(500.0, noiseMin * 3.0)
+                }
+                val isSpeech = calibrated >= 8 && rms > threshold
+                if (isSpeech) {
+                    if (!haveSpeech) {
+                        haveSpeech = true
+                        for (p in preRoll) seg.write(p)
+                        preRoll.clear()
+                    }
+                    seg.write(bytes)
+                    segMs += 100
+                    speechMs += 100
+                    silenceMs = 0
+                    idleMs = 0
+                } else {
+                    if (haveSpeech) {
+                        seg.write(bytes)
+                        segMs += 100
+                        silenceMs += 100
+                    } else {
+                        preRoll.addLast(bytes)
+                        if (preRoll.size > 3) preRoll.removeFirst()
+                    }
+                    idleMs += 100
+                }
+                if (haveSpeech && (silenceMs >= 1200 || segMs >= 25000)) flush()
+                if (idleMs >= 6000) break
+            }
+            if (haveSpeech) flush()
+            endCapture(null)
+        } catch (e: SecurityException) {
+            endCapture("Microphone permission is missing.")
+        } catch (e: Exception) {
+            endCapture("The microphone stopped working.")
+        } finally {
+            try {
+                rec?.stop()
+            } catch (e: Exception) {
+                // ignore
+            }
+            try {
+                rec?.release()
+            } catch (e: Exception) {
+                // ignore
+            }
+        }
+    }
+
+    private fun wavFrom(pcm: ByteArray, rate: Int): ByteArray {
+        val out = ByteArrayOutputStream()
+        fun i32(v: Int) {
+            out.write(v and 0xFF)
+            out.write((v shr 8) and 0xFF)
+            out.write((v shr 16) and 0xFF)
+            out.write((v shr 24) and 0xFF)
+        }
+        fun i16(v: Int) {
+            out.write(v and 0xFF)
+            out.write((v shr 8) and 0xFF)
+        }
+        out.write("RIFF".toByteArray())
+        i32(36 + pcm.size)
+        out.write("WAVE".toByteArray())
+        out.write("fmt ".toByteArray())
+        i32(16)
+        i16(1)
+        i16(1)
+        i32(rate)
+        i32(rate * 2)
+        i16(2)
+        i16(16)
+        out.write("data".toByteArray())
+        i32(pcm.size)
+        out.write(pcm)
+        return out.toByteArray()
+    }
+
+    private fun voicePrompt(lang: String): String =
+        "Transcribe this speech into text that will be typed into a text box. The speaker's main language is " + lang +
+            ": write it in its normal script. When the speaker says English words or phrases, write them in English " +
+            "using Latin letters exactly as spoken, and do not translate them. Add natural punctuation. " +
+            "Output only the transcribed text, with no quotes, labels or explanations. " +
+            "If there is no clear speech, output nothing."
+
+    private fun submitSegment(pcm: ByteArray, langName: String) {
+        val key = prefsObj().getString("gemini_api_key", null)?.trim() ?: return
+        voicePending.incrementAndGet()
+        voiceExecutor.execute {
+            val b64 = Base64.encodeToString(wavFrom(pcm, 16000), Base64.NO_WRAP)
+            val res = callGemini(key, voicePrompt(langName), b64, "audio/wav", false)
+            handler.post {
+                voicePending.decrementAndGet()
+                if (res.ok) {
+                    if (res.text.isNotBlank()) insertVoiceText(res.text.trim())
+                } else {
+                    if (voiceLastError == null) voiceLastError = res.text
+                    voiceStopRequested = true
+                }
+                maybeFinishVoice()
+            }
+        }
+    }
+
+    // Puts the recognised text into the focused text box at the cursor.
+    private fun insertVoiceText(text: String) {
+        val node = findInputField()
+        if (node == null) {
+            if (voiceLastError == null) voiceLastError = "The text box lost focus."
+            voiceStopRequested = true
+            return
+        }
+        node.refresh()
+        var current = node.text?.toString() ?: ""
+        if (node.isShowingHintText) current = ""
+        var start = node.textSelectionStart
+        var end = node.textSelectionEnd
+        if (start < 0 || end < 0 || start > current.length || end > current.length) {
+            start = current.length
+            end = current.length
+        }
+        if (start > end) {
+            val t = start
+            start = end
+            end = t
+        }
+        val before = current.substring(0, start)
+        val after = current.substring(end)
+        val insertion = if (before.isNotEmpty() && !before.last().isWhitespace()) " " + text else text
+        val args = Bundle()
+        args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, before + insertion + after)
+        var ok = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+        if (ok) {
+            val pos = before.length + insertion.length
+            val sel = Bundle()
+            sel.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, pos)
+            sel.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, pos)
+            node.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, sel)
+        } else {
+            // Some apps refuse direct text setting: paste through the clipboard instead.
+            try {
+                suppressWindowEventsUntil = System.currentTimeMillis() + 2000
+                val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                cm.setPrimaryClip(ClipData.newPlainText("voice", insertion))
+                ok = node.performAction(AccessibilityNodeInfo.ACTION_PASTE)
+            } catch (e: Exception) {
+                ok = false
+            }
+        }
+        if (ok) {
+            voiceTyped.append(insertion)
+        } else {
+            if (voiceLastError == null) voiceLastError = "This text box does not accept typed text."
+            voiceStopRequested = true
+        }
+    }
+
     // ======================= AI (Gemini) =======================
 
     private class AiResult(val ok: Boolean, val text: String)
@@ -2483,7 +2921,7 @@ class MyScreenReaderService : AccessibilityService() {
     // One try with one model. next = true means "this model cannot help right now, try another".
     private class Attempt(val ok: Boolean, val text: String, val next: Boolean, val busy: Boolean)
 
-    private fun tryModel(model: String, key: String, prompt: String, imageB64: String): Attempt {
+    private fun tryModel(model: String, key: String, prompt: String, imageB64: String, mime: String, describeMode: Boolean): Attempt {
         try {
             val url = URL("https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent")
             val conn = url.openConnection() as HttpURLConnection
@@ -2494,7 +2932,7 @@ class MyScreenReaderService : AccessibilityService() {
             conn.setRequestProperty("Content-Type", "application/json")
             conn.setRequestProperty("x-goog-api-key", key)
 
-            val inline = JSONObject().put("mime_type", "image/jpeg").put("data", imageB64)
+            val inline = JSONObject().put("mime_type", mime).put("data", imageB64)
             val parts = JSONArray()
                 .put(JSONObject().put("text", prompt))
                 .put(JSONObject().put("inline_data", inline))
@@ -2515,8 +2953,8 @@ class MyScreenReaderService : AccessibilityService() {
                         out.append(partsOut.optJSONObject(i)?.optString("text", "") ?: "")
                     }
                 }
-                val clean = out.toString().replace("*", "").replace("#", "").trim()
-                if (clean.isNotEmpty()) return Attempt(true, clean, false, false)
+                val clean = if (describeMode) out.toString().replace("*", "").replace("#", "").trim() else out.toString().trim()
+                if (clean.isNotEmpty() || !describeMode) return Attempt(true, clean, false, false)
                 return Attempt(false, "The AI did not return a description. The content may have been blocked.", true, false)
             }
             val apiMsg = try {
@@ -2548,7 +2986,7 @@ class MyScreenReaderService : AccessibilityService() {
     // Tries several Gemini models in turn: if one is overloaded (503), over quota (429) or
     // missing (404), the next one is tried automatically. The model that worked last is
     // tried first next time.
-    private fun callGemini(key: String, prompt: String, imageB64: String): AiResult {
+    private fun callGemini(key: String, prompt: String, imageB64: String, mime: String = "image/jpeg", describeMode: Boolean = true): AiResult {
         val prefs = getSharedPreferences("screen_reader_prefs", Context.MODE_PRIVATE)
         val known = listOf(
             "gemini-2.5-flash",
@@ -2568,7 +3006,7 @@ class MyScreenReaderService : AccessibilityService() {
         var sawBusy = false
         for (round in 0 until 2) {
             for (model in models) {
-                val r = tryModel(model, key, prompt, imageB64)
+                val r = tryModel(model, key, prompt, imageB64, mime, describeMode)
                 if (r.ok) {
                     prefs.edit().putString("gemini_last_model", model).apply()
                     return AiResult(true, r.text)
@@ -3101,6 +3539,8 @@ class MyScreenReaderService : AccessibilityService() {
                 .unregisterOnSharedPreferenceChangeListener(it)
         }
         handler.removeCallbacksAndMessages(null)
+        voiceStopRequested = true
+        voiceExecutor.shutdown()
         aiExecutor.shutdown()
         tts?.shutdown()
         soundPool?.release()
@@ -3925,4 +4365,4 @@ XehhiM8td5vR5qBCHY+YMfra10tTy/xgRNRrrRcNNHSbWQAecXeCqdb08bvLZTndI3VLCqEQ2ymD
 I40dle7liPR7vO1czU8olsKzCkWEl52/MBGYRU0qbsVSXODURYJtUaNw6LwLIiFB6wI/FWcJbZRM
 swaeaoenTYwaj+jMx9zsBQPwNy6K9DBNMDEwDQYJYIZIAWUDBAIBBQAEILjKwwGnepKQjMXxBdZP
 DhLirhayEya0aFKSsRRHBYXdBBQYPkjlQTH4cXmwB9zwwKolA13UHAICJxA=
-@@@END count=33
+@@@END count=34
