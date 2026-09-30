@@ -1,0 +1,3928 @@
+@@@BUNDLE version=13
+@@@FILE app/build.gradle lines=48
+apply plugin: 'com.android.application'
+apply plugin: 'kotlin-android'
+
+android {
+    namespace 'com.mohit.screenreader'
+    compileSdk 34
+
+    signingConfigs {
+        debug {
+            storeFile rootProject.file('debug.keystore')
+            storePassword 'android'
+            keyAlias 'androiddebugkey'
+            keyPassword 'android'
+        }
+    }
+
+    defaultConfig {
+        applicationId "com.mohit.screenreader"
+        minSdk 26
+        targetSdk 34
+        versionCode 1
+        versionName "1.0"
+    }
+
+    buildTypes {
+        debug {
+            debuggable true
+            signingConfig signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = "17"
+    }
+
+    buildFeatures {
+        viewBinding false
+    }
+}
+
+dependencies {
+    implementation "org.jetbrains.kotlin:kotlin-stdlib:1.9.24"
+}
+@@@FILE app/src/main/AndroidManifest.xml lines=90
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
+    </queries>
+
+    <application
+        android:allowBackup="true"
+        android:label="@string/app_name"
+        android:icon="@android:drawable/sym_def_app_icon"
+        android:supportsRtl="true"
+        android:theme="@android:style/Theme.DeviceDefault">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="@string/app_name">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".TtsEngineActivity"
+            android:exported="false"
+            android:label="@string/tts_button" />
+
+        <activity
+            android:name=".TtsSettingsActivity"
+            android:exported="false"
+            android:label="@string/tts_settings_button" />
+
+        <activity
+            android:name=".SoundSchemeActivity"
+            android:exported="false"
+            android:label="@string/sound_button" />
+
+        <activity
+            android:name=".CustomizeListActivity"
+            android:exported="false" />
+
+        <activity
+            android:name=".ExtensionsActivity"
+            android:exported="false" />
+
+        <activity
+            android:name=".AutoClickListActivity"
+            android:exported="false" />
+
+        <activity
+            android:name=".AutoClickEditActivity"
+            android:exported="false" />
+
+        <activity
+            android:name=".GestureSettingsActivity"
+            android:exported="false"
+            android:label="@string/gesture_button" />
+
+        <activity
+            android:name=".GamingAppsActivity"
+            android:exported="false"
+            android:label="@string/gaming_button" />
+
+        <activity
+            android:name=".ApiKeyActivity"
+            android:exported="false"
+            android:label="@string/api_key_button" />
+
+        <service
+            android:name=".MyScreenReaderService"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+            android:exported="true"
+            android:label="@string/app_name">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
+
+    </application>
+</manifest>
+@@@FILE app/src/main/java/com/mohit/screenreader/ApiKeyActivity.kt lines=57
+package com.mohit.screenreader
+
+import android.app.Activity
+import android.content.Context
+import android.os.Bundle
+import android.widget.Button
+import android.widget.EditText
+import android.widget.TextView
+
+class ApiKeyActivity : Activity() {
+
+    private lateinit var status: TextView
+    private lateinit var edit: EditText
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_api_key)
+        status = findViewById(R.id.txtKeyStatus)
+        edit = findViewById(R.id.edtApiKey)
+        showStatus()
+
+        findViewById<Button>(R.id.btnSaveKey).setOnClickListener { save() }
+        findViewById<Button>(R.id.btnRemoveKey).setOnClickListener { remove() }
+    }
+
+    private fun prefs() = getSharedPreferences("screen_reader_prefs", Context.MODE_PRIVATE)
+
+    private fun showStatus() {
+        val key = prefs().getString("gemini_api_key", null)
+        status.text = if (key.isNullOrEmpty()) {
+            "No API key is saved yet."
+        } else {
+            "An API key is saved, ending in " + key.takeLast(4) + ". Enter a new one to replace it."
+        }
+    }
+
+    private fun tell(message: String) {
+        status.text = message
+        status.announceForAccessibility(message)
+    }
+
+    private fun save() {
+        val key = edit.text.toString().trim()
+        if (key.isEmpty()) {
+            tell("The box is empty. Paste your API key first.")
+            return
+        }
+        prefs().edit().putString("gemini_api_key", key).apply()
+        edit.setText("")
+        tell("API key saved, ending in " + key.takeLast(4) + ".")
+    }
+
+    private fun remove() {
+        prefs().edit().remove("gemini_api_key").apply()
+        tell("API key removed.")
+    }
+}
+@@@FILE app/src/main/java/com/mohit/screenreader/AutoClickEditActivity.kt lines=81
+package com.mohit.screenreader
+
+import android.app.Activity
+import android.content.Context
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.widget.Button
+import android.widget.EditText
+import android.widget.TextView
+
+class AutoClickEditActivity : Activity() {
+
+    private var index = -1
+    private lateinit var nameBox: EditText
+    private lateinit var stepsBox: EditText
+    private lateinit var status: TextView
+
+    private fun prefs() = getSharedPreferences("screen_reader_prefs", Context.MODE_PRIVATE)
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_autoclick_edit)
+        nameBox = findViewById(R.id.edtMacroName)
+        stepsBox = findViewById(R.id.edtMacroSteps)
+        status = findViewById(R.id.txtMacroStatus)
+        index = intent.getIntExtra("index", -1)
+
+        val delete = findViewById<Button>(R.id.btnDeleteMacro)
+        if (index >= 0) {
+            val list = AutoClickStore.load(prefs())
+            if (index < list.size) {
+                nameBox.setText(list[index].name)
+                stepsBox.setText(list[index].steps.joinToString("\n"))
+            } else {
+                index = -1
+            }
+        }
+        if (index < 0) delete.isEnabled = false
+
+        findViewById<Button>(R.id.btnSaveMacro).setOnClickListener { save() }
+        delete.setOnClickListener { remove() }
+    }
+
+    private fun tell(message: String, thenFinish: Boolean) {
+        status.text = message
+        status.announceForAccessibility(message)
+        if (thenFinish) Handler(Looper.getMainLooper()).postDelayed({ finish() }, 1800)
+    }
+
+    private fun save() {
+        val name = nameBox.text.toString().trim()
+        val steps = stepsBox.text.toString().split("\n").map { it.trim() }.filter { it.isNotEmpty() }
+        if (name.isEmpty()) {
+            tell("Please give the function a name.", false)
+            return
+        }
+        if (steps.isEmpty()) {
+            tell("Please paste at least one item to click.", false)
+            return
+        }
+        val list = AutoClickStore.load(prefs())
+        if (index >= 0 && index < list.size) {
+            list[index] = Macro(name, steps)
+        } else {
+            list.add(Macro(name, steps))
+        }
+        AutoClickStore.save(prefs(), list)
+        tell("Saved " + name + " with " + steps.size + (if (steps.size == 1) " step." else " steps."), true)
+    }
+
+    private fun remove() {
+        val list = AutoClickStore.load(prefs())
+        if (index >= 0 && index < list.size) {
+            val name = list[index].name
+            list.removeAt(index)
+            AutoClickStore.save(prefs(), list)
+            tell("Deleted " + name + ".", true)
+        }
+    }
+}
+@@@FILE app/src/main/java/com/mohit/screenreader/AutoClickListActivity.kt lines=44
+package com.mohit.screenreader
+
+import android.app.Activity
+import android.content.Context
+import android.content.Intent
+import android.os.Bundle
+import android.widget.ArrayAdapter
+import android.widget.Button
+import android.widget.ListView
+
+class AutoClickListActivity : Activity() {
+
+    private lateinit var list: ListView
+    private val rows = mutableListOf<String>()
+    private lateinit var adapter: ArrayAdapter<String>
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_autoclick_list)
+        list = findViewById(R.id.listMacros)
+        adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, rows)
+        list.adapter = adapter
+        list.setOnItemClickListener { _, _, position, _ ->
+            val i = Intent(this, AutoClickEditActivity::class.java)
+            i.putExtra("index", position)
+            startActivity(i)
+        }
+        findViewById<Button>(R.id.btnNewMacro).setOnClickListener {
+            val i = Intent(this, AutoClickEditActivity::class.java)
+            i.putExtra("index", -1)
+            startActivity(i)
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        val prefs = getSharedPreferences("screen_reader_prefs", Context.MODE_PRIVATE)
+        rows.clear()
+        for (m in AutoClickStore.load(prefs)) {
+            rows.add(m.name + ", " + m.steps.size + (if (m.steps.size == 1) " step" else " steps"))
+        }
+        adapter.notifyDataSetChanged()
+    }
+}
+@@@FILE app/src/main/java/com/mohit/screenreader/Customization.kt lines=77
+package com.mohit.screenreader
+
+import android.content.SharedPreferences
+import org.json.JSONArray
+import org.json.JSONObject
+
+// Items of the Screen Reader Menu and the reading controls that can be switched on or off.
+// The user stores only what is switched OFF, so new items added in future updates
+// appear automatically (switched on).
+object MenuConfig {
+    val menuItems: List<Pair<String, String>> = listOf(
+        "copy" to "Copy",
+        "append" to "Append, add to what was copied before",
+        "cut" to "Cut",
+        "paste" to "Paste",
+        "select" to "Select",
+        "clear" to "Clear edit box",
+        "ai" to "AI menu",
+        "extensions" to "Extensions"
+    )
+
+    val readingItems: List<Pair<String, String>> = listOf(
+        "character" to "Character",
+        "word" to "Word",
+        "line" to "Line",
+        "paragraph" to "Paragraph",
+        "actions" to "Actions",
+        "slider" to "Slider"
+    )
+
+    fun disabled(prefs: SharedPreferences, kind: String): Set<String> =
+        prefs.getStringSet("disabled_" + kind, emptySet()) ?: emptySet()
+}
+
+// Built-in extensions. Anything added here (or any auto click function the user creates)
+// automatically shows up in the list of functions a gesture can run.
+object Extensions {
+    val builtin: List<Pair<String, String>> = listOf(
+        "yt_skip" to "Skip ads on YouTube"
+    )
+}
+
+class Macro(var name: String, var steps: List<String>)
+
+// Auto click functions: a name plus a list of on-screen items to click, in order.
+object AutoClickStore {
+    fun load(prefs: SharedPreferences): MutableList<Macro> {
+        val out = mutableListOf<Macro>()
+        val s = prefs.getString("autoclick_functions", null) ?: return out
+        try {
+            val arr = JSONArray(s)
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                val stepsArr = o.getJSONArray("steps")
+                val steps = mutableListOf<String>()
+                for (k in 0 until stepsArr.length()) steps.add(stepsArr.getString(k))
+                out.add(Macro(o.getString("name"), steps))
+            }
+        } catch (e: Exception) {
+            // ignore damaged data
+        }
+        return out
+    }
+
+    fun save(prefs: SharedPreferences, list: List<Macro>) {
+        val arr = JSONArray()
+        for (m in list) {
+            val o = JSONObject()
+            o.put("name", m.name)
+            val st = JSONArray()
+            for (x in m.steps) st.put(x)
+            o.put("steps", st)
+            arr.put(o)
+        }
+        prefs.edit().putString("autoclick_functions", arr.toString()).apply()
+    }
+}
+@@@FILE app/src/main/java/com/mohit/screenreader/CustomizeListActivity.kt lines=41
+package com.mohit.screenreader
+
+import android.app.Activity
+import android.content.Context
+import android.os.Bundle
+import android.widget.ArrayAdapter
+import android.widget.ListView
+import android.widget.TextView
+
+// Tick / untick the items of the Screen Reader Menu ("menu") or the reading controls ("reading").
+class CustomizeListActivity : Activity() {
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_customize_list)
+        val kind = intent.getStringExtra("kind") ?: "menu"
+        val items = if (kind == "menu") MenuConfig.menuItems else MenuConfig.readingItems
+        val prefs = getSharedPreferences("screen_reader_prefs", Context.MODE_PRIVATE)
+        val key = "disabled_" + kind
+
+        val info = findViewById<TextView>(R.id.txtCustomizeInfo)
+        info.text = if (kind == "menu") {
+            "Screen reader menu. Tick the options you want to keep. Unticked options are hidden. New options added in future updates appear ticked automatically. Close menu is always available."
+        } else {
+            "Reading controls. Tick the controls you want to keep. Unticked controls are skipped when you change reading control. New controls added in future updates appear ticked automatically. Normal item is always available."
+        }
+
+        val list = findViewById<ListView>(R.id.listCustomize)
+        list.choiceMode = ListView.CHOICE_MODE_MULTIPLE
+        list.adapter = ArrayAdapter(this, android.R.layout.simple_list_item_multiple_choice, items.map { it.second })
+        val off = prefs.getStringSet(key, emptySet()) ?: emptySet()
+        items.forEachIndexed { i, it -> list.setItemChecked(i, !off.contains(it.first)) }
+
+        list.setOnItemClickListener { _, _, position, _ ->
+            val id = items[position].first
+            val set = HashSet(prefs.getStringSet(key, emptySet()) ?: emptySet())
+            if (list.isItemChecked(position)) set.remove(id) else set.add(id)
+            prefs.edit().putStringSet(key, set).apply()
+        }
+    }
+}
+@@@FILE app/src/main/java/com/mohit/screenreader/ExtensionsActivity.kt lines=26
+package com.mohit.screenreader
+
+import android.app.Activity
+import android.content.Context
+import android.content.Intent
+import android.os.Bundle
+import android.widget.Button
+import android.widget.CheckBox
+
+class ExtensionsActivity : Activity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_extensions)
+        val prefs = getSharedPreferences("screen_reader_prefs", Context.MODE_PRIVATE)
+
+        val skip = findViewById<CheckBox>(R.id.chkYoutubeSkip)
+        skip.isChecked = prefs.getBoolean("ext_youtube_skip", false)
+        skip.setOnCheckedChangeListener { _, checked ->
+            prefs.edit().putBoolean("ext_youtube_skip", checked).apply()
+        }
+
+        findViewById<Button>(R.id.btnAutoClick).setOnClickListener {
+            startActivity(Intent(this, AutoClickListActivity::class.java))
+        }
+    }
+}
+@@@FILE app/src/main/java/com/mohit/screenreader/GamingAppsActivity.kt lines=82
+package com.mohit.screenreader
+
+import android.app.Activity
+import android.content.Context
+import android.content.Intent
+import android.content.pm.ApplicationInfo
+import android.os.Bundle
+import android.widget.ArrayAdapter
+import android.widget.ListView
+import android.widget.TextView
+
+class GamingAppsActivity : Activity() {
+
+    private class Row(val pkg: String, val label: String, val auto: Boolean)
+
+    private val rows = mutableListOf<Row>()
+    private lateinit var list: ListView
+    private lateinit var status: TextView
+
+    private fun prefs() = getSharedPreferences("screen_reader_prefs", Context.MODE_PRIVATE)
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_gaming_apps)
+        list = findViewById(R.id.listApps)
+        status = findViewById(R.id.txtGamingStatus)
+        status.text = "Loading apps..."
+
+        Thread {
+            val pm = packageManager
+            val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+            val seen = HashSet<String>()
+            val found = mutableListOf<Row>()
+            for (ri in pm.queryIntentActivities(intent, 0)) {
+                val pkg = ri.activityInfo.packageName
+                if (pkg == packageName || !seen.add(pkg)) continue
+                val label = ri.loadLabel(pm).toString()
+                val auto = try {
+                    pm.getApplicationInfo(pkg, 0).category == ApplicationInfo.CATEGORY_GAME
+                } catch (e: Exception) {
+                    false
+                }
+                found.add(Row(pkg, label, auto))
+            }
+            found.sortBy { it.label.lowercase() }
+            runOnUiThread { show(found) }
+        }.start()
+    }
+
+    private fun show(found: List<Row>) {
+        rows.clear()
+        rows.addAll(found)
+        val p = prefs()
+        val on = p.getStringSet("gaming_on", emptySet()) ?: emptySet()
+        val off = p.getStringSet("gaming_off", emptySet()) ?: emptySet()
+
+        val labels = rows.map { if (it.auto) it.label + ", detected as a game" else it.label }
+        val adapter = ArrayAdapter(this, android.R.layout.simple_list_item_multiple_choice, labels)
+        list.choiceMode = ListView.CHOICE_MODE_MULTIPLE
+        list.adapter = adapter
+        rows.forEachIndexed { i, r ->
+            val checked = on.contains(r.pkg) || (r.auto && !off.contains(r.pkg))
+            list.setItemChecked(i, checked)
+        }
+        list.setOnItemClickListener { _, _, position, _ ->
+            val r = rows[position]
+            val nowChecked = list.isItemChecked(position)
+            val sp = prefs()
+            val newOn = HashSet(sp.getStringSet("gaming_on", emptySet()) ?: emptySet())
+            val newOff = HashSet(sp.getStringSet("gaming_off", emptySet()) ?: emptySet())
+            if (nowChecked) {
+                newOn.add(r.pkg)
+                newOff.remove(r.pkg)
+            } else {
+                newOff.add(r.pkg)
+                newOn.remove(r.pkg)
+            }
+            sp.edit().putStringSet("gaming_on", newOn).putStringSet("gaming_off", newOff).apply()
+        }
+        status.text = "Tick the apps that should use gaming mode. Apps detected as games are already ticked; untick one to turn it off."
+    }
+}
+@@@FILE app/src/main/java/com/mohit/screenreader/GestureConfig.kt lines=98
+package com.mohit.screenreader
+
+import android.content.SharedPreferences
+
+// The list of gestures that can be customised, the functions they can run, and the defaults.
+object GestureConfig {
+
+    val gestures: List<Pair<String, String>> = listOf(
+        "swipe_right" to "Swipe right",
+        "swipe_left" to "Swipe left",
+        "swipe_up" to "Swipe up",
+        "swipe_down" to "Swipe down",
+        "up_down" to "Swipe up then down",
+        "down_up" to "Swipe down then up",
+        "left_right" to "Swipe left then right",
+        "right_left" to "Swipe right then left",
+        "up_left" to "Swipe up then left",
+        "up_right" to "Swipe up then right",
+        "down_left" to "Swipe down then left",
+        "down_right" to "Swipe down then right",
+        "left_up" to "Swipe left then up",
+        "left_down" to "Swipe left then down",
+        "right_up" to "Swipe right then up",
+        "right_down" to "Swipe right then down",
+        "double_tap_hold" to "Double tap and hold"
+    )
+
+    val functions: List<Pair<String, String>> = listOf(
+        "none" to "Do nothing",
+        "next" to "Next item",
+        "previous" to "Previous item",
+        "activate" to "Activate current item",
+        "read_next" to "Next part of the item (per reading control)",
+        "read_prev" to "Previous part of the item (per reading control)",
+        "control_next" to "Next reading control",
+        "control_prev" to "Previous reading control",
+        "menu" to "Screen reader menu",
+        "back" to "Back",
+        "home" to "Home",
+        "recents" to "Recent apps",
+        "notifications" to "Notifications",
+        "quick_settings" to "Quick settings",
+        "power_dialog" to "Power menu",
+        "lock_screen" to "Lock screen",
+        "screenshot" to "Take screenshot",
+        "copy" to "Copy focused item",
+        "append" to "Append focused item to copied text",
+        "cut" to "Cut",
+        "paste" to "Paste",
+        "clear_edit" to "Clear edit box",
+        "describe_screen" to "AI: Describe screen",
+        "describe_image" to "AI: Describe image",
+        "scroll_forward" to "Scroll list forward",
+        "scroll_backward" to "Scroll list backward",
+        "repeat" to "Repeat last spoken text",
+        "stop_speech" to "Stop speech",
+        "volume_up" to "Speech volume up",
+        "volume_down" to "Speech volume down"
+    )
+
+    val defaults: Map<String, String> = mapOf(
+        "swipe_right" to "next",
+        "swipe_left" to "previous",
+        "swipe_down" to "read_next",
+        "swipe_up" to "read_prev",
+        "down_up" to "control_next",
+        "up_down" to "control_prev",
+        "down_right" to "menu",
+        "down_left" to "back",
+        "up_left" to "home",
+        "left_up" to "recents",
+        "right_down" to "notifications",
+        "up_right" to "quick_settings"
+    )
+
+    fun functionFor(prefs: SharedPreferences, gestureKey: String): String {
+        return prefs.getString("gesture_" + gestureKey, null) ?: defaults[gestureKey] ?: "none"
+    }
+
+    // Fixed functions plus every extension and auto click function that exists right now.
+    fun allFunctions(prefs: SharedPreferences): List<Pair<String, String>> {
+        val list = mutableListOf<Pair<String, String>>()
+        list.addAll(functions)
+        for (e in Extensions.builtin) list.add(("ext:" + e.first) to ("Extension: " + e.second + " (turn on or off)"))
+        for (m in AutoClickStore.load(prefs)) list.add(("macro:" + m.name) to ("Auto click: " + m.name))
+        return list
+    }
+
+    fun functionLabel(id: String): String {
+        functions.firstOrNull { it.first == id }?.let { return it.second }
+        if (id.startsWith("ext:")) {
+            val eid = id.substring(4)
+            return "Extension: " + (Extensions.builtin.firstOrNull { it.first == eid }?.second ?: eid)
+        }
+        if (id.startsWith("macro:")) return "Auto click: " + id.substring(6)
+        return id
+    }
+}
+@@@FILE app/src/main/java/com/mohit/screenreader/GestureSettingsActivity.kt lines=77
+package com.mohit.screenreader
+
+import android.app.Activity
+import android.app.AlertDialog
+import android.content.Context
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.widget.ArrayAdapter
+import android.widget.Button
+import android.widget.ListView
+
+class GestureSettingsActivity : Activity() {
+
+    private lateinit var list: ListView
+    private lateinit var adapter: ArrayAdapter<String>
+    private val rows = mutableListOf<String>()
+
+    private fun prefs() = getSharedPreferences("screen_reader_prefs", Context.MODE_PRIVATE)
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_gesture_settings)
+        list = findViewById(R.id.listGestures)
+        adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, rows)
+        list.adapter = adapter
+        refreshRows()
+
+        list.setOnItemClickListener { _, _, position, _ -> chooseFunction(position) }
+        findViewById<Button>(R.id.btnResetGestures).setOnClickListener {
+            val e = prefs().edit()
+            for (g in GestureConfig.gestures) e.remove("gesture_" + g.first)
+            e.apply()
+            refreshRows()
+            tell("All gestures were reset to their defaults.")
+        }
+    }
+
+    private fun refreshRows() {
+        rows.clear()
+        for (g in GestureConfig.gestures) {
+            rows.add(g.second + ": " + GestureConfig.functionLabel(GestureConfig.functionFor(prefs(), g.first)))
+        }
+        adapter.notifyDataSetChanged()
+    }
+
+    // Announce a little later so it is not cut off by the screen reader reading the screen again.
+    private fun tell(message: String) {
+        Handler(Looper.getMainLooper()).postDelayed({ list.announceForAccessibility(message) }, 900)
+    }
+
+    private fun chooseFunction(position: Int) {
+        val gesture = GestureConfig.gestures[position]
+        val current = GestureConfig.functionFor(prefs(), gesture.first)
+        val funcs = GestureConfig.allFunctions(prefs())
+        val labels = funcs.map { it.second }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle(gesture.second + ". Choose what it does")
+            .setItems(labels) { _, which ->
+                val chosen = funcs[which].first
+                if (current == "menu" && chosen != "menu" && !menuMappedElsewhere(gesture.first)) {
+                    tell("Not changed. Give the Screen reader menu to another gesture first, otherwise you could not open it.")
+                } else {
+                    prefs().edit().putString("gesture_" + gesture.first, chosen).apply()
+                    refreshRows()
+                    tell(gesture.second + " now does: " + GestureConfig.functionLabel(chosen))
+                }
+            }
+            .show()
+    }
+
+    private fun menuMappedElsewhere(exceptKey: String): Boolean {
+        return GestureConfig.gestures.any {
+            it.first != exceptKey && GestureConfig.functionFor(prefs(), it.first) == "menu"
+        }
+    }
+}
+@@@FILE app/src/main/java/com/mohit/screenreader/MainActivity.kt lines=58
+package com.mohit.screenreader
+
+import android.content.Intent
+import android.os.Bundle
+import android.provider.Settings
+import android.widget.Button
+
+class MainActivity : android.app.Activity() {
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_main)
+
+        findViewById<Button>(R.id.btnTts).setOnClickListener {
+            startActivity(Intent(this, TtsEngineActivity::class.java))
+        }
+
+        findViewById<Button>(R.id.btnTtsSettings).setOnClickListener {
+            startActivity(Intent(this, TtsSettingsActivity::class.java))
+        }
+
+        findViewById<Button>(R.id.btnSound).setOnClickListener {
+            startActivity(Intent(this, SoundSchemeActivity::class.java))
+        }
+
+        findViewById<Button>(R.id.btnSettings).setOnClickListener {
+            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+        }
+
+        findViewById<Button>(R.id.btnGestures).setOnClickListener {
+            startActivity(Intent(this, GestureSettingsActivity::class.java))
+        }
+
+        findViewById<Button>(R.id.btnCustomizeMenu).setOnClickListener {
+            val i = Intent(this, CustomizeListActivity::class.java)
+            i.putExtra("kind", "menu")
+            startActivity(i)
+        }
+
+        findViewById<Button>(R.id.btnCustomizeReading).setOnClickListener {
+            val i = Intent(this, CustomizeListActivity::class.java)
+            i.putExtra("kind", "reading")
+            startActivity(i)
+        }
+
+        findViewById<Button>(R.id.btnExtensions).setOnClickListener {
+            startActivity(Intent(this, ExtensionsActivity::class.java))
+        }
+
+        findViewById<Button>(R.id.btnGaming).setOnClickListener {
+            startActivity(Intent(this, GamingAppsActivity::class.java))
+        }
+
+        findViewById<Button>(R.id.btnApiKey).setOnClickListener {
+            startActivity(Intent(this, ApiKeyActivity::class.java))
+        }
+    }
+}
+@@@FILE app/src/main/java/com/mohit/screenreader/MyScreenReaderService.kt lines=2316
+package com.mohit.screenreader
+
+import android.accessibilityservice.AccessibilityService
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.accessibilityservice.AccessibilityServiceInfo
+import android.content.Context
+import android.content.pm.ApplicationInfo
+import android.content.SharedPreferences
+import android.media.AudioAttributes
+import android.media.AudioManager
+import android.media.SoundPool
+import android.graphics.Bitmap
+import android.graphics.Rect
+import android.os.Build
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
+import android.util.Base64
+import android.view.Display
+import android.view.KeyEvent
+import android.view.accessibility.AccessibilityEvent
+import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
+import java.io.ByteArrayOutputStream
+import java.net.HttpURLConnection
+import java.net.URL
+import java.text.BreakIterator
+import java.text.Normalizer
+import java.util.concurrent.Executors
+import org.json.JSONArray
+import org.json.JSONObject
+
+/**
+ * MyScreenReaderService - first working version (v1).
+ *
+ * Standard screen-reader interface:
+ *   - swipe right  -> next item, spoken aloud
+ *   - swipe left   -> previous item, spoken aloud
+ *   - double tap   -> activate (click) the current item
+ *
+ * A short sound plays for every action too (from the selected sound
+ * scheme), and if speech ever fails to fire, an alert sound plays instead
+ * of staying silent, so a failure is never invisible.
+ *
+ * IMPORTANT while testing: TalkBack should be switched OFF before turning
+ * this service on. Two services both asking for touch-exploration/gesture
+ * handling at once is exactly the conflict noted while building the
+ * cricket game - only one of them should own gestures at a time.
+ */
+class MyScreenReaderService : AccessibilityService() {
+
+    private var tts: TextToSpeech? = null
+    private var soundPool: SoundPool? = null
+
+    private var soundFocus: Int? = null
+    private var soundActivate: Int? = null
+    private var soundScreenChange: Int? = null
+    private var soundAlert: Int? = null
+    private val loadedSoundIds = mutableSetOf<Int>()
+
+    private val nodeList = mutableListOf<AccessibilityNodeInfo>()
+    private var currentIndex = -1
+    private var focusedNode: AccessibilityNodeInfo? = null
+
+    private val schemeAssetFolder = "sound_iphone_voiceover"
+
+    private val handler = Handler(Looper.getMainLooper())
+    private var busyScrolling = false
+    private var lastSpoken = ""
+
+    // ---- AI (Gemini) ----
+    private val aiExecutor = Executors.newSingleThreadExecutor()
+    private var aiBusy = false
+    private val aiLabels = listOf("Describe screen", "Describe image", "Back")
+    private var aiIndex = 0
+
+    // ---- Auto focus on new screens ----
+    private var autoFocusPending: Runnable? = null
+    private var lastAutoFocusAt = 0L
+
+    // ---- Gaming mode ----
+    private var gamingActive = false
+    private var lastForegroundPackage: String? = null
+    private var gamingSuppressedPackage: String? = null
+    private var volUpHeld = false
+    private var volDownHeld = false
+    private var lastGameText = ""
+    private var lastGameTextAt = 0L
+
+    // ---- Slider value feedback ----
+    private var sliderSpoken = false
+    private var sliderWatchUntil = 0L
+
+    // ---- Screen Reader Menu state (opened with swipe down-then-right) ----
+    private enum class Mode { NORMAL, MENU, UNIT_CHOOSER, ITEM_SELECT, AI_MENU, EXT_MENU }
+    private enum class SplitKind { CHAR, WORD, LINE, PARAGRAPH }
+
+    private var mode = Mode.NORMAL
+    private var menuIndex = 0
+    private var menuTarget: AccessibilityNodeInfo? = null
+    private val clipList = mutableListOf<String>()
+    private var suppressWindowEventsUntil = 0L
+
+    // The menu is built from the items switched on in "Customize screen reader menu".
+    private var menuIds: List<String> = listOf("close")
+    private val menuLabels: List<String>
+        get() = menuIds.map { id ->
+            if (id == "close") "Close menu" else (MenuConfig.menuItems.firstOrNull { it.first == id }?.second ?: id)
+        }
+
+    private fun refreshMenuIds() {
+        val off = MenuConfig.disabled(getSharedPreferences("screen_reader_prefs", Context.MODE_PRIVATE), "menu")
+        menuIds = MenuConfig.menuItems.map { it.first }.filter { !off.contains(it) } + "close"
+    }
+
+    // ---- Extensions menu ----
+    private var extIds: List<String> = emptyList()
+    private var extIndex = 0
+    private var macroRunning = false
+    private val youtubePackage = "com.google.android.youtube"
+
+    private val unitLabels = listOf("character", "word", "line", "paragraph")
+    private var unitIndex = 0
+    private var splitKind = SplitKind.WORD
+    private var selectUnits: List<String> = emptyList()
+    private var selectedFlags = BooleanArray(0)
+    private var selectIndex = 0
+
+    // ---- Reading controls: change with swipe down-then-up / up-then-down,
+    // ---- then move inside the focused item with plain swipe down / up ----
+    private val readingLabels = listOf("Normal item", "Character", "Word", "Line", "Paragraph", "Actions", "Slider")
+    private var readingIndex = 0
+    private var readUnits: List<String> = emptyList()
+    private var readIndex = -1
+    private var lastModalHoverHintAt = 0L
+
+    // ---- Actions control + edit-box selection mode ----
+    private val actionsControlIndex = 5
+    private val sliderControlIndex = 6
+    private var actionIndex = -1
+    private var selecting = false
+    private var selAnchor = 0
+    private var selCursor = 0
+
+    // ---- Accessibility volume / TTS settings ----
+    private var touching = false
+    private val accessibilityStream = 10 // AudioManager.STREAM_ACCESSIBILITY
+    private var ttsRate = 1.0f
+    private var ttsVolume = 1.0f
+    private var prefsListener: SharedPreferences.OnSharedPreferenceChangeListener? = null
+
+    override fun onServiceConnected() {
+        super.onServiceConnected()
+
+        val prefs = getSharedPreferences("screen_reader_prefs", Context.MODE_PRIVATE)
+        val enginePackage = prefs.getString("tts_engine_package", null)
+
+        handler.removeCallbacks(skipLoop)
+        handler.postDelayed(skipLoop, 2000)
+
+        ttsRate = prefs.getFloat("tts_rate", 1.0f)
+        ttsVolume = prefs.getFloat("tts_volume", 1.0f)
+        val changeListener = SharedPreferences.OnSharedPreferenceChangeListener { p, key ->
+            if (key == "tts_rate") {
+                ttsRate = p.getFloat("tts_rate", 1.0f)
+                tts?.setSpeechRate(ttsRate)
+            } else if (key == "tts_volume") {
+                ttsVolume = p.getFloat("tts_volume", 1.0f)
+            }
+        }
+        prefsListener = changeListener
+        prefs.registerOnSharedPreferenceChangeListener(changeListener)
+
+        // Ask Android for a separate "accessibility volume" channel
+        // (0x80 = FLAG_ENABLE_ACCESSIBILITY_VOLUME) so speech is not tied to media volume.
+        try {
+            val info = serviceInfo
+            if (info != null) {
+                info.flags = info.flags or 0x00000080
+                serviceInfo = info
+            }
+        } catch (e: Exception) {
+            // Not fatal: speech still works, just possibly on the shared volume.
+        }
+
+        val initListener = TextToSpeech.OnInitListener { status ->
+            if (status == TextToSpeech.SUCCESS) {
+                // Speak on the accessibility audio channel instead of the media channel.
+                tts?.setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build()
+                )
+                tts?.setSpeechRate(ttsRate)
+                tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                    override fun onStart(utteranceId: String?) {}
+                    override fun onDone(utteranceId: String?) {}
+                    override fun onError(utteranceId: String?) {
+                        playSound(soundAlert)
+                    }
+                })
+            } else {
+                playSound(soundAlert)
+            }
+        }
+
+        tts = if (enginePackage != null) {
+            TextToSpeech(this, initListener, enginePackage)
+        } else {
+            TextToSpeech(this, initListener)
+        }
+
+        val attrs = AudioAttributes.Builder()
+            .setUsage(AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY)
+            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+            .build()
+        soundPool = SoundPool.Builder()
+            .setMaxStreams(4)
+            .setAudioAttributes(attrs)
+            .build()
+        soundPool?.setOnLoadCompleteListener { _, sampleId, status ->
+            if (status == 0) {
+                loadedSoundIds.add(sampleId)
+            }
+        }
+
+        soundFocus = loadSound("focus2.ogg")
+        soundActivate = loadSound("click.ogg")
+        soundScreenChange = loadSound("ScreenChange.ogg")
+        soundAlert = loadSound("Alert.ogg")
+    }
+
+    private fun loadSound(filename: String): Int? {
+        return try {
+            val afd = assets.openFd("$schemeAssetFolder/$filename")
+            val id = soundPool?.load(afd, 1)
+            afd.close()
+            id
+        } catch (e: Exception) {
+            // Sound scheme file not bundled in this build yet - stays silent
+            // for this one cue rather than crashing the service.
+            null
+        }
+    }
+
+    private fun playSound(soundId: Int?) {
+        if (soundId != null && loadedSoundIds.contains(soundId)) {
+            soundPool?.play(soundId, 1f, 1f, 1, 0, 1f)
+        }
+    }
+
+    private fun speak(text: String) {
+        val engine = tts
+        if (engine == null) {
+            playSound(soundAlert)
+            return
+        }
+        lastSpoken = text
+        val utteranceId = "u" + System.currentTimeMillis()
+        val params = Bundle()
+        params.putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, ttsVolume)
+        val result = engine.speak(text, TextToSpeech.QUEUE_FLUSH, params, utteranceId)
+        if (result == TextToSpeech.ERROR) {
+            playSound(soundAlert)
+        }
+    }
+
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        event ?: return
+        when (event.eventType) {
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> {
+                // The on-screen keyboard is its own window - it must not reset our focus.
+                if (isInputMethodEvent(event)) return
+                updateGamingMode(event.packageName?.toString())
+                // While the menu is open, or right after we touch the clipboard
+                // (Android 13 shows a system "copied" popup), ignore this so the
+                // menu / focus is not reset.
+                if (mode != Mode.NORMAL || System.currentTimeMillis() < suppressWindowEventsUntil) return
+                if (gamingActive) return
+                scheduleAutoFocus(event.text.joinToString(" ").trim())
+            }
+            AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> {
+                if (gamingActive) speakGameText(event)
+            }
+            AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED -> {
+                if (mode == Mode.NORMAL && !gamingActive &&
+                    System.currentTimeMillis() >= suppressWindowEventsUntil) echoTyping(event)
+            }
+            AccessibilityEvent.TYPE_ANNOUNCEMENT -> {
+                // Apps (like YouTube) announce things such as a new slider position this way.
+                if (mode != Mode.NORMAL) return
+                val said = event.text.joinToString(" ").trim()
+                if (said.isNotEmpty()) {
+                    if (System.currentTimeMillis() < sliderWatchUntil) sliderSpoken = true
+                    speak(said)
+                }
+            }
+            AccessibilityEvent.TYPE_TOUCH_INTERACTION_START -> {
+                touching = true
+            }
+            AccessibilityEvent.TYPE_TOUCH_INTERACTION_END -> {
+                touching = false
+            }
+            AccessibilityEvent.TYPE_VIEW_HOVER_ENTER -> {
+                if (mode != Mode.NORMAL) {
+                    hintModalEntry()
+                    return
+                }
+                handleHover(event)
+            }
+        }
+    }
+
+    /**
+     * Explore-by-touch: when a finger is dragged (not swiped) directly onto a
+     * screen item, Android's touch-exploration layer (enabled via
+     * flagRequestTouchExplorationMode in accessibility_service_config.xml)
+     * automatically hit-tests and reports the exact view under the finger as
+     * a HOVER_ENTER event - no manual coordinate math needed here. This is
+     * on top of (not instead of) swipe navigation and double-tap activation.
+     */
+    private fun handleHover(event: AccessibilityEvent) {
+        val raw = event.source ?: return
+        // If the finger is on a piece of text inside a clickable row, treat the
+        // whole row as the item (same as swipe navigation does).
+        var node: AccessibilityNodeInfo = raw
+        if (!node.isClickable && !isSlider(node)) {
+            var p = node.parent
+            var d = 0
+            while (p != null && d < 4) {
+                if (p.isClickable && labelOf(p) != null) {
+                    node = p
+                    break
+                }
+                p = p.parent
+                d++
+            }
+        }
+        if (!node.isVisibleToUser) return
+        if (labelOf(node) == null && !isSlider(node)) return
+
+        focusedNode = node
+        resetFocusState()
+        // Best-effort: keep swipe navigation picking up from near where the
+        // finger just was.
+        val hovered = node
+        val matchIndex = nodeList.indexOfFirst { it == hovered }
+        if (matchIndex >= 0) currentIndex = matchIndex
+
+        node.performAction(AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS)
+        playSound(soundFocus)
+        speak(spokenLabel(node))
+    }
+
+    private fun rebuildNodeList() {
+        nodeList.clear()
+        val root = rootInActiveWindow
+        if (root != null) collectNodes(root, nodeList, false)
+        // The on-screen keyboard is a separate window: include its keys after the app's items.
+        try {
+            for (w in windows) {
+                if (w.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD) {
+                    val r = w.root
+                    if (r != null) collectNodes(r, nodeList, false)
+                }
+            }
+        } catch (e: Exception) {
+            // Keyboard keys are optional.
+        }
+    }
+
+    // ---- Labels: one item per row, never an empty "item" followed by its own text ----
+
+    private fun ownLabel(node: AccessibilityNodeInfo): String? {
+        return node.text?.toString()?.takeIf { it.isNotBlank() }
+            ?: node.contentDescription?.toString()?.takeIf { it.isNotBlank() }
+    }
+
+    // Text of the non-clickable descendants of a clickable row, joined together.
+    private fun gatherText(node: AccessibilityNodeInfo, out: MutableList<String>, depth: Int) {
+        if (depth > 6 || out.size > 8) return
+        for (i in 0 until node.childCount) {
+            val c = node.getChild(i) ?: continue
+            if (!c.isVisibleToUser) continue
+            if (c.isClickable) continue // a separate control, it is its own item
+            val own = ownLabel(c)
+            if (own != null) out.add(own) else gatherText(c, out, depth + 1)
+        }
+    }
+
+    private fun mergedText(node: AccessibilityNodeInfo): String? {
+        if (!node.isClickable || node.isScrollable) return null
+        val parts = mutableListOf<String>()
+        gatherText(node, parts, 0)
+        if (parts.isEmpty() || parts.size > 8) return null
+        return parts.joinToString(", ")
+    }
+
+    // Full spoken label: its own text plus the text of plain children (e.g. a quick-settings tile
+    // whose name and "On/Off" are separate views) plus its state (On/Off, checked).
+    private fun labelOf(node: AccessibilityNodeInfo): String? {
+        val parts = mutableListOf<String>()
+        val own = ownLabel(node)
+        if (own != null) parts.add(own)
+        if (node.isClickable) {
+            // Tiles often keep the name in the description and only the extra info in the text.
+            val cd = node.contentDescription?.toString()?.takeIf { it.isNotBlank() }
+            if (cd != null && parts.none { it.contains(cd, true) || cd.contains(it, true) }) parts.add(0, cd)
+            try {
+                val lb = node.labeledBy?.let { ownLabel(it) }
+                if (lb != null && parts.none { it.contains(lb, true) }) parts.add(0, lb)
+            } catch (e: Exception) {
+                // optional
+            }
+        }
+        if (node.isClickable && !node.isScrollable && (own == null || own.length <= 40)) {
+            val g = mutableListOf<String>()
+            gatherText(node, g, 0)
+            if (g.size <= 8) {
+                for (x in g) if (parts.none { it.contains(x, true) }) parts.add(x)
+            }
+        }
+        if (parts.isEmpty()) return null
+        if (!isSlider(node)) {
+            var state: String? = null
+            if (Build.VERSION.SDK_INT >= 30) {
+                state = node.stateDescription?.toString()?.takeIf { it.isNotBlank() }
+            }
+            if (state == null && node.isCheckable) {
+                val cls = node.className?.toString() ?: ""
+                state = if (cls.contains("Switch") || cls.contains("Toggle")) {
+                    if (node.isChecked) "On" else "Off"
+                } else {
+                    if (node.isChecked) "checked" else "not checked"
+                }
+            }
+            val st = state
+            if (st != null && parts.none { it.contains(st, true) }) parts.add(st)
+        }
+        return parts.joinToString(", ")
+    }
+
+    private fun hasLabeledDescendant(node: AccessibilityNodeInfo, depth: Int = 0): Boolean {
+        if (depth > 6) return false
+        for (i in 0 until node.childCount) {
+            val c = node.getChild(i) ?: continue
+            if (!c.isVisibleToUser) continue
+            if (ownLabel(c) != null) return true
+            if (hasLabeledDescendant(c, depth + 1)) return true
+        }
+        return false
+    }
+
+    private fun collectNodes(node: AccessibilityNodeInfo?, out: MutableList<AccessibilityNodeInfo>, insideMerged: Boolean) {
+        if (node == null) return
+        if (!node.isVisibleToUser) return
+        val label = labelOf(node)
+        val clickableOk = node.isClickable && (label != null || !hasLabeledDescendant(node))
+        val slider = isSlider(node)
+        val eligible = clickableOk || slider || (!insideMerged && label != null)
+        if (eligible) out.add(node)
+        // Once a labelled clickable row has been added, its plain text children are
+        // already part of its label: only real controls inside it stay separate items.
+        val merged = insideMerged || (node.isClickable && label != null && eligible)
+        for (i in 0 until node.childCount) {
+            collectNodes(node.getChild(i), out, merged)
+        }
+    }
+
+    // ---- Keeping the swipe list fresh (feeds like YouTube load items after the screen opens) ----
+
+    private fun isDescendantOf(node: AccessibilityNodeInfo, ancestor: AccessibilityNodeInfo): Boolean {
+        var cur: AccessibilityNodeInfo? = node.parent
+        var d = 0
+        while (cur != null && d < 20) {
+            if (cur == ancestor) return true
+            cur = cur.parent
+            d++
+        }
+        return false
+    }
+
+    private fun boundsOf(node: AccessibilityNodeInfo): Rect {
+        val r = Rect()
+        node.getBoundsInScreen(r)
+        return r
+    }
+
+    // Rebuilds the list from the live screen and finds the currently focused item in it again.
+    private fun syncList(): Boolean {
+        val old = focusedNode
+        val oldLabel = old?.let { labelOf(it) }
+        val oldTop = old?.let { boundsOf(it).top } ?: 0
+        rebuildNodeList()
+        if (old != null) {
+            var idx = nodeList.indexOfFirst { it == old }
+            if (idx < 0 && oldLabel != null) {
+                var best = -1
+                var bestDiff = Int.MAX_VALUE
+                nodeList.forEachIndexed { i, n ->
+                    if (labelOf(n) == oldLabel) {
+                        val diff = Math.abs(boundsOf(n).top - oldTop)
+                        if (diff < bestDiff) {
+                            bestDiff = diff
+                            best = i
+                        }
+                    }
+                }
+                idx = best
+            }
+            if (idx >= 0) {
+                currentIndex = idx
+                focusedNode = nodeList[idx]
+                return true
+            }
+        }
+        currentIndex = if (nodeList.isEmpty()) -1 else minOf(currentIndex, nodeList.size - 1)
+        return false
+    }
+
+    private fun findScrollableAncestor(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
+        var cur: AccessibilityNodeInfo? = node
+        var d = 0
+        while (cur != null && d < 25) {
+            if (cur.isScrollable) return cur
+            cur = cur.parent
+            d++
+        }
+        return null
+    }
+
+    private fun findAnyScrollable(node: AccessibilityNodeInfo?, depth: Int = 0): AccessibilityNodeInfo? {
+        if (node == null || depth > 25) return null
+        if (node.isVisibleToUser && node.isScrollable) return node
+        for (i in 0 until node.childCount) {
+            val f = findAnyScrollable(node.getChild(i), depth + 1)
+            if (f != null) return f
+        }
+        return null
+    }
+
+    @Suppress("DEPRECATION")
+    private fun gestureKey(id: Int): String? = when (id) {
+        AccessibilityService.GESTURE_SWIPE_UP -> "swipe_up"
+        AccessibilityService.GESTURE_SWIPE_DOWN -> "swipe_down"
+        AccessibilityService.GESTURE_SWIPE_LEFT -> "swipe_left"
+        AccessibilityService.GESTURE_SWIPE_RIGHT -> "swipe_right"
+        AccessibilityService.GESTURE_SWIPE_LEFT_AND_RIGHT -> "left_right"
+        AccessibilityService.GESTURE_SWIPE_RIGHT_AND_LEFT -> "right_left"
+        AccessibilityService.GESTURE_SWIPE_UP_AND_DOWN -> "up_down"
+        AccessibilityService.GESTURE_SWIPE_DOWN_AND_UP -> "down_up"
+        AccessibilityService.GESTURE_SWIPE_LEFT_AND_UP -> "left_up"
+        AccessibilityService.GESTURE_SWIPE_LEFT_AND_DOWN -> "left_down"
+        AccessibilityService.GESTURE_SWIPE_RIGHT_AND_UP -> "right_up"
+        AccessibilityService.GESTURE_SWIPE_RIGHT_AND_DOWN -> "right_down"
+        AccessibilityService.GESTURE_SWIPE_UP_AND_LEFT -> "up_left"
+        AccessibilityService.GESTURE_SWIPE_UP_AND_RIGHT -> "up_right"
+        AccessibilityService.GESTURE_SWIPE_DOWN_AND_LEFT -> "down_left"
+        AccessibilityService.GESTURE_SWIPE_DOWN_AND_RIGHT -> "down_right"
+        AccessibilityService.GESTURE_DOUBLE_TAP_AND_HOLD -> "double_tap_hold"
+        else -> null
+    }
+
+    override fun onGesture(gestureId: Int): Boolean {
+        if (gestureId == AccessibilityService.GESTURE_DOUBLE_TAP) {
+            if (mode == Mode.NORMAL) activateCurrent() else activateModal()
+            return true
+        }
+        if (mode != Mode.NORMAL) {
+            // Inside the menu the gestures are fixed so you can never get stuck.
+            when (gestureId) {
+                AccessibilityService.GESTURE_SWIPE_RIGHT -> stepModal(1)
+                AccessibilityService.GESTURE_SWIPE_LEFT -> stepModal(-1)
+                AccessibilityService.GESTURE_SWIPE_DOWN_AND_RIGHT -> closeMenu()
+                AccessibilityService.GESTURE_SWIPE_DOWN_AND_LEFT -> goBack()
+            }
+            return true
+        }
+        val key = gestureKey(gestureId) ?: return super.onGesture(gestureId)
+        val prefs = getSharedPreferences("screen_reader_prefs", Context.MODE_PRIVATE)
+        runFunction(GestureConfig.functionFor(prefs, key))
+        return true
+    }
+
+    private fun globalAction(action: Int) {
+        if (performGlobalAction(action)) playSound(soundActivate) else fail("Could not do that")
+    }
+
+    // Copy, cut, paste etc. on the focused item, straight from a gesture.
+    private fun quickOp(op: (AccessibilityNodeInfo) -> OpResult) {
+        val node = focusedNode ?: nodeList.getOrNull(currentIndex)
+        if (node == null) {
+            fail("Focus an item first")
+            return
+        }
+        val r = op(node)
+        if (r.ok) {
+            playSound(soundActivate)
+            speak(r.msg)
+        } else {
+            fail(r.msg)
+        }
+    }
+
+    private fun scrollFromGesture(dir: Int) {
+        val from = focusedNode ?: nodeList.getOrNull(currentIndex)
+        val scroller = findVerticalScroller(from, dir) ?: findAnyScrollable(rootInActiveWindow)
+        if (scroller != null && scrollList(scroller, dir)) {
+            playSound(soundFocus)
+        } else {
+            fail(if (dir > 0) "Cannot scroll forward" else "Cannot scroll back")
+        }
+    }
+
+    private fun runFunction(id: String) {
+        when (id) {
+            "none" -> {}
+            "next" -> moveNext()
+            "previous" -> movePrevious()
+            "activate" -> activateCurrent()
+            "read_next" -> readStep(1)
+            "read_prev" -> readStep(-1)
+            "control_next" -> changeReadingControl(1)
+            "control_prev" -> changeReadingControl(-1)
+            "menu" -> openMenu()
+            "back" -> globalAction(GLOBAL_ACTION_BACK)
+            "home" -> globalAction(GLOBAL_ACTION_HOME)
+            "recents" -> globalAction(GLOBAL_ACTION_RECENTS)
+            "notifications" -> globalAction(GLOBAL_ACTION_NOTIFICATIONS)
+            "quick_settings" -> globalAction(GLOBAL_ACTION_QUICK_SETTINGS)
+            "power_dialog" -> globalAction(GLOBAL_ACTION_POWER_DIALOG)
+            "lock_screen" -> if (Build.VERSION.SDK_INT >= 28) globalAction(GLOBAL_ACTION_LOCK_SCREEN) else fail("Needs Android 9 or newer")
+            "screenshot" -> if (Build.VERSION.SDK_INT >= 28) globalAction(GLOBAL_ACTION_TAKE_SCREENSHOT) else fail("Needs Android 9 or newer")
+            "copy" -> quickOp { opCopy(it, false) }
+            "append" -> quickOp { opCopy(it, true) }
+            "cut" -> quickOp { opCut(it) }
+            "paste" -> quickOp { opPaste(it) }
+            "clear_edit" -> quickOp { opClear(it) }
+            "describe_screen" -> runAi(false)
+            "describe_image" -> {
+                menuTarget = focusedNode ?: nodeList.getOrNull(currentIndex)
+                runAi(true)
+            }
+            "scroll_forward" -> scrollFromGesture(1)
+            "scroll_backward" -> scrollFromGesture(-1)
+            "repeat" -> if (lastSpoken.isNotEmpty()) speak(lastSpoken) else playSound(soundAlert)
+            "stop_speech" -> tts?.stop()
+            "volume_up" -> adjustAccessibilityVolume(true)
+            "volume_down" -> adjustAccessibilityVolume(false)
+            else -> runDynamicFunction(id)
+        }
+    }
+
+    // Extensions and auto click functions chosen for a gesture.
+    private fun runDynamicFunction(id: String) {
+        if (id.startsWith("macro:")) {
+            val name = id.substring(6)
+            val m = AutoClickStore.load(prefsObj()).firstOrNull { it.name == name }
+            if (m == null) fail("Function not found") else runMacro(m)
+        } else if (id.startsWith("ext:")) {
+            val eid = id.substring(4)
+            if (eid == "yt_skip") {
+                val p = prefsObj()
+                p.edit().putBoolean("ext_youtube_skip", !p.getBoolean("ext_youtube_skip", false)).apply()
+                playSound(soundActivate)
+                speak(extLabel("yt_skip"))
+            } else {
+                fail("Extension not found")
+            }
+        }
+    }
+
+    private fun moveNext() = moveBy(1)
+
+    private fun movePrevious() = moveBy(-1)
+
+    // Can this node scroll up/down (vertical lists only) in the given direction?
+    private fun canScrollVertically(node: AccessibilityNodeInfo, dir: Int): Boolean {
+        val ids = node.actionList.map { it.id }
+        val down = ids.contains(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_DOWN.id)
+        val up = ids.contains(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_UP.id)
+        val left = ids.contains(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_LEFT.id)
+        val right = ids.contains(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_RIGHT.id)
+        if (down || up) return if (dir > 0) down else up
+        if (left || right) return false // horizontal only (chips, carousels)
+        return ids.contains(if (dir > 0) AccessibilityNodeInfo.ACTION_SCROLL_FORWARD else AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD)
+    }
+
+    // The outermost vertical list around this item that can still scroll in this direction.
+    private fun findVerticalScroller(from: AccessibilityNodeInfo?, dir: Int): AccessibilityNodeInfo? {
+        var cur: AccessibilityNodeInfo? = from
+        var best: AccessibilityNodeInfo? = null
+        var d = 0
+        while (cur != null && d < 30) {
+            if (cur.isScrollable && canScrollVertically(cur, dir)) best = cur
+            cur = cur.parent
+            d++
+        }
+        return best
+    }
+
+    private fun scrollList(scroller: AccessibilityNodeInfo, dir: Int): Boolean {
+        val ids = scroller.actionList.map { it.id }
+        val directional = if (dir > 0) AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_DOWN.id
+        else AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_UP.id
+        if (ids.contains(directional) && scroller.performAction(directional)) return true
+        return scroller.performAction(
+            if (dir > 0) AccessibilityNodeInfo.ACTION_SCROLL_FORWARD else AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
+        )
+    }
+
+    private fun moveBy(dir: Int) {
+        if (busyScrolling) return
+        syncList()
+        if (nodeList.isEmpty()) {
+            playSound(soundAlert)
+            speak("No items found on this screen")
+            return
+        }
+        val from = focusedNode ?: nodeList.getOrNull(currentIndex)
+        val target = currentIndex + dir
+        val nextNode = nodeList.getOrNull(target)
+        // If the item after this one is not inside the same vertical list (or there is none)
+        // and that list can still scroll, scroll it to bring in more items first.
+        val scroller = findVerticalScroller(from, dir)
+        val needScroll = scroller != null && (nextNode == null || !isDescendantOf(nextNode, scroller))
+        if (!needScroll) {
+            if (nextNode != null) {
+                currentIndex = target
+                announceCurrent()
+            } else {
+                wrapAround(dir)
+            }
+            return
+        }
+        if (scroller != null && scrollList(scroller, dir)) {
+            busyScrolling = true
+            handler.postDelayed({
+                busyScrolling = false
+                val found = syncList()
+                val next = currentIndex + dir
+                if (found && next in nodeList.indices && isDescendantOf(nodeList[next], scroller)) {
+                    currentIndex = next
+                    announceCurrent()
+                } else {
+                    // The old item scrolled out of view (or nothing new came): pick the
+                    // first (or last) item inside the scrolled list.
+                    val inside = nodeList.indices.filter { isDescendantOf(nodeList[it], scroller) }
+                    val pick = if (dir > 0) inside.firstOrNull() else inside.lastOrNull()
+                    if (pick != null) {
+                        currentIndex = pick
+                        announceCurrent()
+                    } else if (found && next in nodeList.indices) {
+                        currentIndex = next
+                        announceCurrent()
+                    } else {
+                        fail(if (dir > 0) "End of list" else "Start of list")
+                    }
+                }
+            }, 700)
+            return
+        }
+        if (nextNode != null) {
+            currentIndex = target
+            announceCurrent()
+        } else {
+            wrapAround(dir)
+        }
+    }
+
+    private fun wrapAround(dir: Int) {
+        if (nodeList.isEmpty()) return
+        currentIndex = if (dir > 0) 0 else nodeList.size - 1
+        announceCurrent()
+    }
+
+    // What is spoken for an item: its label, and for sliders also the value and how to change it.
+    private fun spokenLabel(node: AccessibilityNodeInfo): String {
+        val label = labelOf(node)
+        if (isSlider(node)) {
+            val value = sliderValueOrNull(node) ?: "value unknown"
+            return (label ?: "Slider") + ", slider, " + value + ", swipe up to increase, swipe down to decrease"
+        }
+        return label ?: "Item"
+    }
+
+    private fun announceCurrent() {
+        val node = nodeList.getOrNull(currentIndex) ?: return
+        focusedNode = node
+        resetFocusState()
+        node.performAction(AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS)
+        playSound(soundFocus)
+        speak(spokenLabel(node))
+    }
+
+    // ======================= Sliders =======================
+
+    private fun isSlider(node: AccessibilityNodeInfo): Boolean {
+        val cls = node.className?.toString() ?: ""
+        if (cls.contains("SeekBar") || cls.contains("Slider")) return true
+        val ids = node.actionList.map { it.id }
+        if (ids.contains(AccessibilityNodeInfo.AccessibilityAction.ACTION_SET_PROGRESS.id)) return true
+        val ri = node.rangeInfo
+        if (ri != null && (ids.contains(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD) ||
+                ids.contains(AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD))) return true
+        return false
+    }
+
+    private fun formatMillis(ms: Float): String {
+        val total = Math.round(ms / 1000f)
+        val h = total / 3600
+        val m = (total % 3600) / 60
+        val sec = total % 60
+        val parts = mutableListOf<String>()
+        if (h > 0) parts.add("" + h + (if (h == 1) " hour" else " hours"))
+        if (m > 0) parts.add("" + m + (if (m == 1) " minute" else " minutes"))
+        if (sec > 0 || parts.isEmpty()) parts.add("" + sec + (if (sec == 1) " second" else " seconds"))
+        return parts.joinToString(" ")
+    }
+
+    private val timeRegex = Regex("^\\d{1,2}(:\\d{2}){1,2}$")
+
+    private fun collectTimeTexts(node: AccessibilityNodeInfo?, out: MutableList<String>, depth: Int) {
+        if (node == null || depth > 4 || out.size >= 2) return
+        val t = ownLabel(node)
+        if (t != null && timeRegex.matches(t.trim())) out.add(t.trim())
+        for (i in 0 until node.childCount) collectTimeTexts(node.getChild(i), out, depth + 1)
+    }
+
+    // Players such as YouTube show "0:05" and "10:00" as separate text next to the seek bar.
+    private fun nearbyTimeText(node: AccessibilityNodeInfo): String? {
+        var cur: AccessibilityNodeInfo? = node.parent
+        var level = 0
+        while (cur != null && level < 3) {
+            val found = mutableListOf<String>()
+            collectTimeTexts(cur, found, 0)
+            if (found.isNotEmpty()) {
+                return if (found.size >= 2) found[0] + " of " + found[1] else found[0]
+            }
+            cur = cur.parent
+            level++
+        }
+        return null
+    }
+
+    // The current value of a slider as text, or null if the app exposes nothing readable.
+    private fun sliderValueOrNull(node: AccessibilityNodeInfo): String? {
+        if (Build.VERSION.SDK_INT >= 30) {
+            val sd = node.stateDescription?.toString()
+            if (!sd.isNullOrBlank()) return sd
+        }
+        val ri = node.rangeInfo
+        if (ri != null && ri.max > ri.min) {
+            val pct = Math.round((ri.current - ri.min) / (ri.max - ri.min) * 100f)
+            val range = ri.max - ri.min
+            return if (range >= 10000f) {
+                "" + pct + " percent, " + formatMillis(ri.current) + " of " + formatMillis(ri.max)
+            } else {
+                "" + pct + " percent"
+            }
+        }
+        nearbyTimeText(node)?.let { return it }
+        return node.text?.toString()?.takeIf { it.isNotBlank() }
+    }
+
+    // increase = true raises the value, false lowers it. Returns false only if nothing worked.
+    private fun adjustSlider(node: AccessibilityNodeInfo, increase: Boolean): Boolean {
+        node.refresh()
+        val ri = node.rangeInfo
+        val ids = node.actionList.map { it.id }
+        val canSet = ids.contains(AccessibilityNodeInfo.AccessibilityAction.ACTION_SET_PROGRESS.id)
+        val canScroll = ids.contains(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD) ||
+            ids.contains(AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD)
+        var ok = false
+        if (ri != null && ri.max > ri.min) {
+            val range = ri.max - ri.min
+            if (increase && ri.current >= ri.max) {
+                fail("Maximum")
+                return true
+            }
+            if (!increase && ri.current <= ri.min) {
+                fail("Minimum")
+                return true
+            }
+            val preferScroll = range > 1000f && canScroll
+            if (canSet && !preferScroll) {
+                val isInt = ri.type == AccessibilityNodeInfo.RangeInfo.RANGE_TYPE_INT
+                val step = if (isInt && range <= 20f) 1f else range / 20f
+                var target = ri.current + (if (increase) step else -step)
+                target = target.coerceIn(ri.min, ri.max)
+                if (isInt) target = Math.round(target).toFloat()
+                val args = Bundle()
+                args.putFloat(AccessibilityNodeInfo.ACTION_ARGUMENT_PROGRESS_VALUE, target)
+                ok = node.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SET_PROGRESS.id, args)
+            }
+        }
+        if (!ok) {
+            val act = if (increase) AccessibilityNodeInfo.ACTION_SCROLL_FORWARD else AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
+            ok = node.performAction(act)
+        }
+        if (!ok) return false
+        playSound(soundFocus)
+        sliderSpoken = false
+        sliderWatchUntil = System.currentTimeMillis() + 1500
+        // Speak the NEW value. Apps update it a moment after the action, so read it
+        // after a short delay, and try once more if nothing readable showed up yet.
+        handler.postDelayed({
+            if (!sliderSpoken) {
+                node.refresh()
+                val v = sliderValueOrNull(node)
+                if (v != null) {
+                    sliderSpoken = true
+                    speak(v)
+                }
+            }
+        }, 300)
+        handler.postDelayed({
+            if (!sliderSpoken) {
+                node.refresh()
+                sliderSpoken = true
+                speak(sliderValueOrNull(node) ?: "Value changed")
+            }
+        }, 900)
+        return true
+    }
+
+    // Reading control "Slider": works on the focused slider, else the first slider found
+    // on screen, else (if nothing is detected) tries the focused item directly.
+    private fun sliderControlStep(increase: Boolean) {
+        val cur = focusedNode ?: nodeList.getOrNull(currentIndex)
+        var target: AccessibilityNodeInfo? = if (cur != null && isSlider(cur)) cur else null
+        if (target == null) {
+            rebuildNodeList()
+            val idx = nodeList.indexOfFirst { isSlider(it) }
+            if (idx >= 0) {
+                target = nodeList[idx]
+                currentIndex = idx
+                focusedNode = target
+                target.performAction(AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS)
+            }
+        }
+        if (target != null) {
+            if (!adjustSlider(target, increase)) fail("Could not change the slider")
+            return
+        }
+        if (cur != null && adjustSlider(cur, increase)) return
+        fail("No slider found. Focus a slider first")
+    }
+
+    private fun activateCurrent() {
+        val node = focusedNode ?: nodeList.getOrNull(currentIndex)
+        if (node == null) {
+            playSound(soundAlert)
+            speak("First swipe to or touch an item")
+            return
+        }
+        if (readingIndex == actionsControlIndex && actionIndex >= 0) {
+            val chosen = actionsFor(node).getOrNull(actionIndex)
+            if (chosen != null) {
+                val r = runEditAction(node, chosen)
+                if (r.ok) {
+                    playSound(soundActivate)
+                    speak(r.msg)
+                } else {
+                    fail(r.msg)
+                }
+                return
+            }
+        }
+        val didClick = clickNodeOrAncestor(node)
+        if (didClick) {
+            playSound(soundActivate)
+        } else {
+            playSound(soundAlert)
+        }
+    }
+
+    // ======================= Reading controls =======================
+
+    private fun resetReading() {
+        readUnits = emptyList()
+        readIndex = -1
+        actionIndex = -1
+    }
+
+    // Called whenever focus moves to a different item: also ends selection mode.
+    private fun resetFocusState() {
+        resetReading()
+        selecting = false
+    }
+
+    private fun changeReadingControl(dir: Int) {
+        // Only the reading controls switched on in "Customize reading controls" are used.
+        val off = MenuConfig.disabled(getSharedPreferences("screen_reader_prefs", Context.MODE_PRIVATE), "reading")
+        val ids = listOf("normal", "character", "word", "line", "paragraph", "actions", "slider")
+        val enabled = ids.indices.filter { it == 0 || !off.contains(ids[it]) }
+        val pos = enabled.indexOf(readingIndex).let { if (it < 0) 0 else it }
+        readingIndex = enabled[wrap(pos + dir, enabled.size)]
+        resetReading()
+        playSound(soundFocus)
+        speak(readingLabels[readingIndex])
+    }
+
+    private fun nodeText(node: AccessibilityNodeInfo): String? {
+        node.refresh()
+        val t = if (node.isShowingHintText) null else node.text?.toString()
+        return t?.takeIf { it.isNotBlank() }
+            ?: node.contentDescription?.toString()?.takeIf { it.isNotBlank() }
+            ?: mergedText(node)
+    }
+
+    private fun readStep(dir: Int) {
+        // Swipe up = increase, swipe down = decrease (dir is +1 for down).
+        if (readingIndex == sliderControlIndex) {
+            sliderControlStep(dir < 0)
+            return
+        }
+        if (readingIndex == 0) {
+            val focused = focusedNode ?: nodeList.getOrNull(currentIndex)
+            if (focused != null && isSlider(focused)) {
+                if (!adjustSlider(focused, dir < 0)) fail("Could not change the slider")
+                return
+            }
+            fail("Normal item. Swipe down then up to choose character, word, line, paragraph, actions or slider")
+            return
+        }
+        val node = focusedNode ?: nodeList.getOrNull(currentIndex)
+        if (node == null) {
+            fail("Focus an item first")
+            return
+        }
+        if (readingIndex == actionsControlIndex) {
+            stepAction(node, dir)
+            return
+        }
+        val kind = SplitKind.values()[readingIndex - 1]
+        // Edit boxes: swipes move the real cursor (and extend the selection in selection mode).
+        if (node.isEditable) {
+            cursorStep(node, kind, dir)
+            return
+        }
+        if (readUnits.isEmpty()) {
+            val text = nodeText(node)
+            if (text == null) {
+                fail("This item has no readable text")
+                return
+            }
+            readUnits = splitText(text, kind, true)
+            if (readUnits.isEmpty()) {
+                fail("This item has no readable text")
+                return
+            }
+            readIndex = if (dir > 0) -1 else readUnits.size
+        }
+        val next = readIndex + dir
+        if (next < 0) {
+            fail("Start")
+            return
+        }
+        if (next >= readUnits.size) {
+            fail("End")
+            return
+        }
+        readIndex = next
+        playSound(soundFocus)
+        speak(speakable(readUnits[next]))
+    }
+
+    private fun clickNodeOrAncestor(node: AccessibilityNodeInfo): Boolean {
+        node.refresh()
+        var cur: AccessibilityNodeInfo? = node
+        var depth = 0
+        while (cur != null && depth < 6) {
+            if (cur.isClickable && cur.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
+            cur = cur.parent
+            depth++
+        }
+        return node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+    }
+
+    private fun hintModalEntry() {
+        val now = System.currentTimeMillis()
+        if (now - lastModalHoverHintAt < 2500) return
+        lastModalHoverHintAt = now
+        val current = when (mode) {
+            Mode.MENU -> menuLabels[menuIndex]
+            Mode.UNIT_CHOOSER -> unitLabels[unitIndex]
+            Mode.ITEM_SELECT -> describeSelectEntry(selectIndex)
+            Mode.AI_MENU -> aiLabels[aiIndex]
+            Mode.EXT_MENU -> extLabel(extIds.getOrNull(extIndex) ?: "back")
+            Mode.NORMAL -> ""
+        }
+        speak("Menu is open. Swipe left or right to change, double tap to choose. Now: " + current)
+    }
+
+    // ======================= Screen Reader Menu =======================
+
+    private fun wrap(i: Int, n: Int): Int = ((i % n) + n) % n
+
+    private fun openMenu() {
+        menuTarget = focusedNode ?: nodeList.getOrNull(currentIndex)
+        refreshMenuIds()
+        mode = Mode.MENU
+        menuIndex = 0
+        playSound(soundScreenChange)
+        speak("Screen reader menu. Swipe left or right to change options, double tap to choose. " + menuLabels[0])
+    }
+
+    private fun closeMenu() {
+        mode = Mode.NORMAL
+        menuTarget = null
+        playSound(soundScreenChange)
+        speak("Menu closed")
+    }
+
+    private fun goBack() {
+        when (mode) {
+            Mode.ITEM_SELECT -> {
+                mode = Mode.UNIT_CHOOSER
+                playSound(soundFocus)
+                speak("Choose unit. " + unitLabels[unitIndex])
+            }
+            Mode.UNIT_CHOOSER -> {
+                mode = Mode.MENU
+                playSound(soundFocus)
+                speak("Menu. " + menuLabels[menuIndex])
+            }
+            Mode.AI_MENU, Mode.EXT_MENU -> {
+                mode = Mode.MENU
+                playSound(soundFocus)
+                speak("Menu. " + menuLabels[menuIndex])
+            }
+            Mode.MENU -> closeMenu()
+            Mode.NORMAL -> {}
+        }
+    }
+
+    private fun stepModal(dir: Int) {
+        playSound(soundFocus)
+        when (mode) {
+            Mode.MENU -> {
+                menuIndex = wrap(menuIndex + dir, menuLabels.size)
+                speak(menuLabels[menuIndex])
+            }
+            Mode.UNIT_CHOOSER -> {
+                unitIndex = wrap(unitIndex + dir, unitLabels.size)
+                speak(unitLabels[unitIndex])
+            }
+            Mode.ITEM_SELECT -> {
+                selectIndex = wrap(selectIndex + dir, selectUnits.size + 2)
+                speak(describeSelectEntry(selectIndex))
+            }
+            Mode.AI_MENU -> {
+                aiIndex = wrap(aiIndex + dir, aiLabels.size)
+                speak(aiLabels[aiIndex])
+            }
+            Mode.EXT_MENU -> {
+                extIndex = wrap(extIndex + dir, extIds.size)
+                speak(extLabel(extIds[extIndex]))
+            }
+            Mode.NORMAL -> {}
+        }
+    }
+
+    private fun activateModal() {
+        when (mode) {
+            Mode.MENU -> when (menuIds.getOrNull(menuIndex)) {
+                "copy" -> doCopy()
+                "append" -> doAppend()
+                "cut" -> doCut()
+                "paste" -> doPaste()
+                "select" -> startSelect()
+                "clear" -> doClear()
+                "ai" -> openAiMenu()
+                "extensions" -> openExtMenu()
+                else -> closeMenu()
+            }
+            Mode.EXT_MENU -> activateExt()
+            Mode.AI_MENU -> when (aiIndex) {
+                0 -> runAi(false)
+                1 -> runAi(true)
+                else -> goBack()
+            }
+            Mode.UNIT_CHOOSER -> beginItemSelect(SplitKind.values()[unitIndex])
+            Mode.ITEM_SELECT -> {
+                val n = selectUnits.size
+                when {
+                    selectIndex < n -> toggleSelected(selectIndex)
+                    selectIndex == n -> copySelection(false)
+                    else -> copySelection(true)
+                }
+            }
+            Mode.NORMAL -> {}
+        }
+    }
+
+    private fun fail(message: String) {
+        playSound(soundAlert)
+        speak(message)
+    }
+
+    private fun finish(message: String) {
+        mode = Mode.NORMAL
+        menuTarget = null
+        playSound(soundActivate)
+        speak(message)
+    }
+
+    private fun targetText(): String? {
+        val node = menuTarget
+        if (node == null) {
+            fail("Focus an item first, then open the menu")
+            return null
+        }
+        node.refresh()
+        val t = if (node.isShowingHintText) null else node.text?.toString()
+        val s = t?.takeIf { it.isNotBlank() }
+            ?: node.contentDescription?.toString()?.takeIf { it.isNotBlank() }
+            ?: mergedText(node)
+        if (s == null) {
+            fail("This item has no text that can be copied")
+            return null
+        }
+        return s
+    }
+
+    private fun writeClipboard(): Boolean {
+        return try {
+            val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            cm.setPrimaryClip(ClipData.newPlainText("screen_reader", clipList.joinToString("\n")))
+            suppressWindowEventsUntil = System.currentTimeMillis() + 2000
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    // ======================= Auto focus on a new screen =======================
+
+    private fun scheduleAutoFocus(title: String) {
+        autoFocusPending?.let { handler.removeCallbacks(it) }
+        val r = Runnable { autoFocus(title) }
+        autoFocusPending = r
+        handler.postDelayed(r, 350)
+    }
+
+    // Instead of announcing "new screen", put focus somewhere sensible and read it.
+    private fun autoFocus(title: String) {
+        if (mode != Mode.NORMAL || gamingActive) return
+        val now = System.currentTimeMillis()
+        if (now - lastAutoFocusAt < 1200) return
+        lastAutoFocusAt = now
+        rebuildNodeList()
+        currentIndex = -1
+        focusedNode = null
+        resetFocusState()
+        playSound(soundScreenChange)
+        if (nodeList.isEmpty()) {
+            if (title.isNotEmpty()) speak(title)
+            return
+        }
+        var idx = 0
+        try {
+            val input = rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+            if (input != null) {
+                val i = nodeList.indexOfFirst { it == input }
+                if (i >= 0) idx = i
+            }
+        } catch (e: Exception) {
+            // keep first item
+        }
+        currentIndex = idx
+        val node = nodeList[idx]
+        focusedNode = node
+        node.performAction(AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS)
+        val label = spokenLabel(node)
+        speak(if (title.isNotEmpty() && title != label) "$title. $label" else label)
+    }
+
+    // ======================= Typing feedback =======================
+
+    private fun typedCharText(c: Char): String = when {
+        c.isUpperCase() -> "capital $c"
+        c == ' ' -> "space"
+        c == '\n' -> "new line"
+        else -> c.toString()
+    }
+
+    private fun echoTyping(event: AccessibilityEvent) {
+        if (event.isPassword) return
+        val now = event.text.firstOrNull()?.toString() ?: return
+        val from = event.fromIndex
+        val added = event.addedCount
+        val removed = event.removedCount
+        if (added > 0 && from >= 0 && from + added <= now.length) {
+            val ins = now.substring(from, from + added)
+            if (ins.length == 1) {
+                val c = ins[0]
+                if (c == ' ' || c == '\n') {
+                    // Space or Enter: say the word that was just finished.
+                    val before = now.substring(0, from).trimEnd()
+                    val word = before.split(' ', '\n').lastOrNull() ?: ""
+                    speak(if (word.isNotBlank()) word else typedCharText(c))
+                } else {
+                    speak(typedCharText(c))
+                }
+            } else if (ins.isNotBlank()) {
+                speak(if (ins.length > 300) ins.substring(0, 300) else ins.trim())
+            }
+        } else if (removed > 0 && added == 0) {
+            val before = event.beforeText?.toString()
+            if (before != null && from >= 0 && from < before.length) {
+                val gone = before.substring(from, minOf(before.length, from + removed))
+                speak(if (gone.length == 1) "deleted " + typedCharText(gone[0]) else "deleted")
+            } else {
+                speak("deleted")
+            }
+        }
+    }
+
+    // ======================= Gaming mode =======================
+
+    private fun isGamePackage(pkg: String): Boolean {
+        if (pkg == packageName) return false
+        val prefs = getSharedPreferences("screen_reader_prefs", Context.MODE_PRIVATE)
+        val on = prefs.getStringSet("gaming_on", emptySet()) ?: emptySet()
+        val off = prefs.getStringSet("gaming_off", emptySet()) ?: emptySet()
+        if (off.contains(pkg)) return false
+        if (on.contains(pkg)) return true
+        return try {
+            packageManager.getApplicationInfo(pkg, 0).category == ApplicationInfo.CATEGORY_GAME
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    private fun updateGamingMode(pkg: String?) {
+        if (pkg == null || pkg == packageName || pkg == "com.android.systemui") return
+        if (pkg == lastForegroundPackage) return
+        lastForegroundPackage = pkg
+        if (gamingSuppressedPackage != null && gamingSuppressedPackage != pkg) gamingSuppressedPackage = null
+        val want = gamingSuppressedPackage != pkg && isGamePackage(pkg)
+        if (want && !gamingActive) enterGaming() else if (!want && gamingActive) exitGaming()
+    }
+
+    private fun setTouchExploration(on: Boolean) {
+        try {
+            val info = serviceInfo ?: return
+            val f = AccessibilityServiceInfo.FLAG_REQUEST_TOUCH_EXPLORATION_MODE or
+                AccessibilityServiceInfo.FLAG_SERVICE_HANDLES_DOUBLE_TAP
+            info.flags = if (on) info.flags or f else info.flags and f.inv()
+            serviceInfo = info
+        } catch (e: Exception) {
+            // ignore
+        }
+    }
+
+    private fun enterGaming() {
+        gamingActive = true
+        mode = Mode.NORMAL
+        menuTarget = null
+        autoFocusPending?.let { handler.removeCallbacks(it) }
+        setTouchExploration(false)
+        playSound(soundScreenChange)
+        speak("Gaming mode on. Screen reader touch gestures are off. Press both volume keys together to turn it off.")
+    }
+
+    private fun exitGaming() {
+        gamingActive = false
+        setTouchExploration(true)
+        playSound(soundScreenChange)
+        speak("Gaming mode off")
+    }
+
+    // In gaming mode there is no touch exploration, so read text the game itself puts on screen.
+    private fun speakGameText(event: AccessibilityEvent) {
+        val types = event.contentChangeTypes
+        val textual = (types and AccessibilityEvent.CONTENT_CHANGE_TYPE_TEXT) != 0 ||
+            (types and AccessibilityEvent.CONTENT_CHANGE_TYPE_CONTENT_DESCRIPTION) != 0
+        if (!textual) return
+        var t = event.text.joinToString(" ").trim()
+        if (t.isEmpty()) t = event.contentDescription?.toString()?.trim() ?: ""
+        if (t.isEmpty()) return
+        val now = System.currentTimeMillis()
+        if (t == lastGameText && now - lastGameTextAt < 1000) return
+        lastGameText = t
+        lastGameTextAt = now
+        speak(t)
+    }
+
+    // ======================= Extensions =======================
+
+    private fun prefsObj() = getSharedPreferences("screen_reader_prefs", Context.MODE_PRIVATE)
+
+    private fun extLabel(id: String): String {
+        if (id == "yt_skip") {
+            return "Skip ads on YouTube: " + (if (prefsObj().getBoolean("ext_youtube_skip", false)) "On" else "Off")
+        }
+        if (id.startsWith("macro:")) {
+            val idx = id.substring(6).toIntOrNull() ?: -1
+            val list = AutoClickStore.load(prefsObj())
+            return "Run function: " + (list.getOrNull(idx)?.name ?: "unknown")
+        }
+        return "Back"
+    }
+
+    private fun openExtMenu() {
+        val macros = AutoClickStore.load(prefsObj())
+        extIds = listOf("yt_skip") + macros.indices.map { "macro:" + it } + "back"
+        extIndex = 0
+        mode = Mode.EXT_MENU
+        playSound(soundScreenChange)
+        speak("Extensions. Swipe left or right, double tap to choose. " + extLabel(extIds[0]))
+    }
+
+    private fun activateExt() {
+        val id = extIds.getOrNull(extIndex) ?: return
+        when {
+            id == "yt_skip" -> {
+                val p = prefsObj()
+                p.edit().putBoolean("ext_youtube_skip", !p.getBoolean("ext_youtube_skip", false)).apply()
+                playSound(soundActivate)
+                speak(extLabel(id))
+            }
+            id.startsWith("macro:") -> {
+                val idx = id.substring(6).toIntOrNull() ?: -1
+                val m = AutoClickStore.load(prefsObj()).getOrNull(idx)
+                if (m == null) fail("Function not found") else runMacro(m)
+            }
+            else -> goBack()
+        }
+    }
+
+    // ---- YouTube: press "Skip ad" automatically ----
+
+    private val skipLoop = object : Runnable {
+        override fun run() {
+            try {
+                if (!gamingActive && lastForegroundPackage == youtubePackage &&
+                    prefsObj().getBoolean("ext_youtube_skip", false)
+                ) {
+                    trySkipAd()
+                }
+            } catch (e: Exception) {
+                // never let the loop die
+            }
+            handler.postDelayed(this, 1000)
+        }
+    }
+
+    private fun nfc(s: String): String = Normalizer.normalize(s, Normalizer.Form.NFC).lowercase()
+
+    private fun isSkipAdLabel(raw: String): Boolean {
+        val l = nfc(raw).trim()
+        if (l == "skip" || l == "skip ad" || l == "skip ads" || l.startsWith("skip ad")) return true
+        return l.contains(nfc("\u0935\u093f\u091c\u094d\u091e\u093e\u092a\u0928")) && l.contains(nfc("\u091b\u094b\u0921\u093c"))
+    }
+
+    private fun trySkipAd() {
+        val root = rootInActiveWindow ?: return
+        if (root.packageName?.toString() != youtubePackage) return
+        val candidates = mutableListOf<AccessibilityNodeInfo>()
+        candidates.addAll(root.findAccessibilityNodeInfosByText("skip"))
+        candidates.addAll(root.findAccessibilityNodeInfosByText("\u0935\u093f\u091c\u094d\u091e\u093e\u092a\u0928"))
+        for (c in candidates) {
+            if (!c.isVisibleToUser) continue
+            val labels = listOfNotNull(ownLabel(c), c.contentDescription?.toString())
+            if (labels.any { isSkipAdLabel(it) }) {
+                if (clickNodeOrAncestor(c)) {
+                    playSound(soundActivate)
+                    speak("Ad skipped")
+                    return
+                }
+            }
+        }
+    }
+
+    // ---- Auto click functions ----
+
+    private fun normLabel(s: String): String = s.trim().replace(Regex("\\s+"), " ").lowercase()
+
+    private fun labelsOfNode(n: AccessibilityNodeInfo): List<String> {
+        val l = mutableListOf<String>()
+        ownLabel(n)?.let { l.add(it) }
+        n.contentDescription?.toString()?.takeIf { it.isNotBlank() }?.let { l.add(it) }
+        labelOf(n)?.let { l.add(it) }
+        mergedText(n)?.let { l.add(it) }
+        return l.map { normLabel(it) }
+    }
+
+    // Finds the item copied from the screen: an exact match first, then the shortest label containing it.
+    private fun findStepNode(step: String, avoid: AccessibilityNodeInfo?, allowAvoid: Boolean): AccessibilityNodeInfo? {
+        rebuildNodeList()
+        val want = normLabel(step)
+        var partial: AccessibilityNodeInfo? = null
+        var partialLen = Int.MAX_VALUE
+        for (n in nodeList) {
+            if (avoid != null && n == avoid && !allowAvoid) continue
+            val labels = labelsOfNode(n)
+            if (labels.any { it == want }) return n
+            val shortest = labels.filter { it.contains(want) }.minOfOrNull { it.length }
+            if (shortest != null && shortest < partialLen) {
+                partial = n
+                partialLen = shortest
+            }
+        }
+        return partial
+    }
+
+    private fun runMacro(m: Macro) {
+        if (m.steps.isEmpty()) {
+            fail("This function has no steps")
+            return
+        }
+        if (macroRunning) {
+            fail("A function is already running")
+            return
+        }
+        macroRunning = true
+        mode = Mode.NORMAL
+        menuTarget = null
+        playSound(soundActivate)
+        speak("Running " + m.name)
+        handler.postDelayed({ macroStep(m.steps, 0, null, System.currentTimeMillis()) }, 1200)
+    }
+
+    private fun macroStep(steps: List<String>, idx: Int, last: AccessibilityNodeInfo?, since: Long) {
+        if (idx >= steps.size) {
+            macroRunning = false
+            playSound(soundActivate)
+            speak("Function finished")
+            return
+        }
+        val elapsed = System.currentTimeMillis() - since
+        // If only the item we just clicked matches, wait a little in case the screen is still changing.
+        val node = findStepNode(steps[idx], last, elapsed > 1500)
+        if (node != null) {
+            clickNodeOrAncestor(node)
+            playSound(soundFocus)
+            handler.postDelayed({ macroStep(steps, idx + 1, node, System.currentTimeMillis()) }, 900)
+            return
+        }
+        if (elapsed > 5000) {
+            macroRunning = false
+            fail("Could not find " + steps[idx] + " on the screen. Stopped at step " + (idx + 1))
+            return
+        }
+        handler.postDelayed({ macroStep(steps, idx, last, since) }, 300)
+    }
+
+    // ======================= AI (Gemini) =======================
+
+    private class AiResult(val ok: Boolean, val text: String)
+
+    private fun openAiMenu() {
+        mode = Mode.AI_MENU
+        aiIndex = 0
+        playSound(soundScreenChange)
+        speak("AI menu. Swipe left or right to change, double tap to choose. " + aiLabels[0])
+    }
+
+    private fun runAi(imageOnly: Boolean) {
+        val prefs = getSharedPreferences("screen_reader_prefs", Context.MODE_PRIVATE)
+        val key = prefs.getString("gemini_api_key", null)?.trim()
+        if (key.isNullOrEmpty()) {
+            fail("No API key found. Open the screen reader app and choose Add API key first.")
+            return
+        }
+        if (aiBusy) {
+            fail("Already working on a request. Please wait.")
+            return
+        }
+        if (Build.VERSION.SDK_INT < 30) {
+            fail("AI descriptions need Android 11 or newer.")
+            return
+        }
+        var crop: Rect? = null
+        if (imageOnly) {
+            val node = menuTarget
+            if (node == null) {
+                fail("Focus an image first, then open the menu.")
+                return
+            }
+            node.refresh()
+            val r = boundsOf(node)
+            if (r.width() < 20 || r.height() < 20) {
+                fail("Could not find where this item is on the screen.")
+                return
+            }
+            crop = r
+        }
+        mode = Mode.NORMAL
+        menuTarget = null
+        aiBusy = true
+        playSound(soundActivate)
+        speak(if (imageOnly) "Describing image. Please wait." else "Describing screen. Please wait.")
+        val cropFinal = crop
+        // Small delay so the spoken hint and menu state settle before the screenshot.
+        handler.postDelayed({ captureAndDescribe(key, imageOnly, cropFinal) }, 400)
+    }
+
+    private fun aiFail(message: String) {
+        handler.post {
+            aiBusy = false
+            fail(message)
+        }
+    }
+
+    private fun captureAndDescribe(key: String, imageOnly: Boolean, crop: Rect?) {
+        if (Build.VERSION.SDK_INT < 30) {
+            aiBusy = false
+            return
+        }
+        try {
+            takeScreenshot(Display.DEFAULT_DISPLAY, aiExecutor, object : AccessibilityService.TakeScreenshotCallback {
+                override fun onSuccess(result: AccessibilityService.ScreenshotResult) {
+                    try {
+                        val hw = result.hardwareBuffer
+                        val hwBmp = Bitmap.wrapHardwareBuffer(hw, result.colorSpace)
+                        val soft = hwBmp?.copy(Bitmap.Config.ARGB_8888, false)
+                        hw.close()
+                        if (soft == null) {
+                            aiFail("Could not read the screenshot.")
+                            return
+                        }
+                        var bmp: Bitmap = soft
+                        if (crop != null) {
+                            val l = crop.left.coerceIn(0, bmp.width - 1)
+                            val t = crop.top.coerceIn(0, bmp.height - 1)
+                            val r = crop.right.coerceIn(l + 1, bmp.width)
+                            val b = crop.bottom.coerceIn(t + 1, bmp.height)
+                            if (r - l < 20 || b - t < 20) {
+                                aiFail("This item is not visible on the screen.")
+                                return
+                            }
+                            bmp = Bitmap.createBitmap(bmp, l, t, r - l, b - t)
+                        }
+                        val maxDim = 1280
+                        val longest = maxOf(bmp.width, bmp.height)
+                        if (longest > maxDim) {
+                            val scale = maxDim.toFloat() / longest
+                            bmp = Bitmap.createScaledBitmap(
+                                bmp, maxOf(1, (bmp.width * scale).toInt()), maxOf(1, (bmp.height * scale).toInt()), true
+                            )
+                        }
+                        val bos = ByteArrayOutputStream()
+                        bmp.compress(Bitmap.CompressFormat.JPEG, 85, bos)
+                        val b64 = Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP)
+                        val prompt = if (imageOnly) AI_PROMPT_IMAGE else AI_PROMPT_SCREEN
+                        val res = callGemini(key, prompt, b64)
+                        handler.post {
+                            aiBusy = false
+                            if (res.ok) {
+                                playSound(soundActivate)
+                                speakLong(res.text)
+                            } else {
+                                fail(res.text)
+                            }
+                        }
+                    } catch (e: Exception) {
+                        aiFail("Something went wrong while preparing the picture.")
+                    }
+                }
+
+                override fun onFailure(errorCode: Int) {
+                    aiFail("Could not take a screenshot. Some screens block screenshots. Error " + errorCode)
+                }
+            })
+        } catch (e: Exception) {
+            aiBusy = false
+            fail("Could not take a screenshot.")
+        }
+    }
+
+    private val AI_PROMPT_SCREEN =
+        "You are helping a blind person who uses a screen reader on an Android phone. " +
+            "Describe this screenshot clearly, from top to bottom: which app or screen it is, the main content, " +
+            "all important visible text (read it out), the buttons and controls, and briefly what any pictures show. " +
+            "Write plain sentences that sound natural when read aloud. Do not use markdown, bullet points, or asterisks."
+
+    private val AI_PROMPT_IMAGE =
+        "You are helping a blind person. Describe this image in detail: the main subject, people " +
+            "(appearance, expressions, actions), objects, the setting, colors, and transcribe any text visible in it. " +
+            "Write plain sentences that sound natural when read aloud. Do not use markdown, bullet points, or asterisks."
+
+    // One try with one model. next = true means "this model cannot help right now, try another".
+    private class Attempt(val ok: Boolean, val text: String, val next: Boolean, val busy: Boolean)
+
+    private fun tryModel(model: String, key: String, prompt: String, imageB64: String): Attempt {
+        try {
+            val url = URL("https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent")
+            val conn = url.openConnection() as HttpURLConnection
+            conn.requestMethod = "POST"
+            conn.connectTimeout = 20000
+            conn.readTimeout = 60000
+            conn.doOutput = true
+            conn.setRequestProperty("Content-Type", "application/json")
+            conn.setRequestProperty("x-goog-api-key", key)
+
+            val inline = JSONObject().put("mime_type", "image/jpeg").put("data", imageB64)
+            val parts = JSONArray()
+                .put(JSONObject().put("text", prompt))
+                .put(JSONObject().put("inline_data", inline))
+            val body = JSONObject().put("contents", JSONArray().put(JSONObject().put("parts", parts)))
+            conn.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
+
+            val code = conn.responseCode
+            val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+            val resp = stream?.bufferedReader()?.use { it.readText() } ?: ""
+            conn.disconnect()
+
+            if (code in 200..299) {
+                val out = StringBuilder()
+                val cands = JSONObject(resp).optJSONArray("candidates")
+                val partsOut = cands?.optJSONObject(0)?.optJSONObject("content")?.optJSONArray("parts")
+                if (partsOut != null) {
+                    for (i in 0 until partsOut.length()) {
+                        out.append(partsOut.optJSONObject(i)?.optString("text", "") ?: "")
+                    }
+                }
+                val clean = out.toString().replace("*", "").replace("#", "").trim()
+                if (clean.isNotEmpty()) return Attempt(true, clean, false, false)
+                return Attempt(false, "The AI did not return a description. The content may have been blocked.", true, false)
+            }
+            val apiMsg = try {
+                JSONObject(resp).getJSONObject("error").getString("message")
+            } catch (e: Exception) {
+                ""
+            }
+            return when (code) {
+                400 -> if (apiMsg.contains("API key", true)) {
+                    Attempt(false, "Your API key is not valid. Please check it in the app.", false, false)
+                } else {
+                    Attempt(false, "The request was rejected. " + apiMsg, true, false)
+                }
+                401, 403 -> Attempt(false, "Your API key was rejected. Please check it in the app.", false, false)
+                404 -> Attempt(false, "AI model " + model + " is not available.", true, false)
+                429 -> Attempt(false, "Quota exceeded or too many requests.", true, true)
+                500, 502, 503, 504 -> Attempt(false, "The AI service is busy.", true, true)
+                else -> Attempt(false, "AI service error " + code + ". " + apiMsg, true, false)
+            }
+        } catch (e: java.net.UnknownHostException) {
+            return Attempt(false, "No internet connection.", false, false)
+        } catch (e: java.net.SocketTimeoutException) {
+            return Attempt(false, "The AI request timed out.", true, true)
+        } catch (e: Exception) {
+            return Attempt(false, "Network error. Please try again.", true, false)
+        }
+    }
+
+    // Tries several Gemini models in turn: if one is overloaded (503), over quota (429) or
+    // missing (404), the next one is tried automatically. The model that worked last is
+    // tried first next time.
+    private fun callGemini(key: String, prompt: String, imageB64: String): AiResult {
+        val prefs = getSharedPreferences("screen_reader_prefs", Context.MODE_PRIVATE)
+        val known = listOf(
+            "gemini-2.5-flash",
+            "gemini-2.5-flash-lite",
+            "gemini-flash-latest",
+            "gemini-flash-lite-latest",
+            "gemini-2.0-flash",
+            "gemini-2.0-flash-lite"
+        )
+        val lastGood = prefs.getString("gemini_last_model", null)
+        val models = if (lastGood != null && known.contains(lastGood)) {
+            listOf(lastGood) + known.filter { it != lastGood }
+        } else {
+            known
+        }
+        var lastError = "Unknown error."
+        var sawBusy = false
+        for (round in 0 until 2) {
+            for (model in models) {
+                val r = tryModel(model, key, prompt, imageB64)
+                if (r.ok) {
+                    prefs.edit().putString("gemini_last_model", model).apply()
+                    return AiResult(true, r.text)
+                }
+                lastError = r.text
+                if (r.busy) sawBusy = true
+                if (!r.next) return AiResult(false, r.text)
+            }
+            // Every model failed: if it was because of load, wait a moment and go round once more.
+            if (round == 0 && sawBusy) {
+                try {
+                    Thread.sleep(2500)
+                } catch (e: InterruptedException) {
+                    break
+                }
+            } else {
+                break
+            }
+        }
+        if (sawBusy) {
+            return AiResult(false, "All AI models are busy or over quota right now. Please try again in a minute.")
+        }
+        return AiResult(false, lastError)
+    }
+
+    // Speaks long text in chunks (text-to-speech engines refuse very long strings).
+    private fun speakLong(text: String) {
+        val engine = tts
+        if (engine == null) {
+            playSound(soundAlert)
+            return
+        }
+        val chunks = mutableListOf<String>()
+        var rest = text
+        while (rest.length > 3000) {
+            var cut = rest.lastIndexOf(". ", 3000)
+            if (cut < 500) cut = rest.lastIndexOf(' ', 3000)
+            if (cut < 1) cut = 3000
+            chunks.add(rest.substring(0, cut + 1))
+            rest = rest.substring(cut + 1)
+        }
+        if (rest.isNotBlank()) chunks.add(rest)
+        chunks.forEachIndexed { i, c ->
+            val params = Bundle()
+            params.putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, ttsVolume)
+            val r = engine.speak(
+                c,
+                if (i == 0) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD,
+                params,
+                "ai" + System.currentTimeMillis() + "_" + i
+            )
+            if (r == TextToSpeech.ERROR) playSound(soundAlert)
+        }
+    }
+
+    // ======================= Shared edit operations =======================
+
+    private class OpResult(val ok: Boolean, val msg: String)
+
+    private enum class EditAction {
+        CURSOR_START, CURSOR_END, TOGGLE_SELECT, COPY, APPEND, CUT, PASTE, CLEAR
+    }
+
+    private fun menuOp(op: (AccessibilityNodeInfo) -> OpResult) {
+        val node = menuTarget
+        if (node == null) {
+            fail("Focus an item first, then open the menu")
+            return
+        }
+        val r = op(node)
+        if (r.ok) finish(r.msg) else fail(r.msg)
+    }
+
+    private fun doCopy() = menuOp { opCopy(it, false) }
+    private fun doAppend() = menuOp { opCopy(it, true) }
+    private fun doCut() = menuOp { opCut(it) }
+    private fun doPaste() = menuOp { opPaste(it) }
+    private fun doClear() = menuOp { opClear(it) }
+
+    private fun editableText(node: AccessibilityNodeInfo): String {
+        return if (node.isShowingHintText) "" else (node.text?.toString() ?: "")
+    }
+
+    // Returns the selected range (start, end) of a text field, or null if nothing is selected.
+    private fun selectionOf(node: AccessibilityNodeInfo): Pair<Int, Int>? {
+        val start = node.textSelectionStart
+        val end = node.textSelectionEnd
+        if (start < 0 || end < 0) return null
+        val len = editableText(node).length
+        val s0 = minOf(start, end)
+        val e0 = maxOf(start, end)
+        if (e0 <= s0 || e0 > len) return null
+        return Pair(s0, e0)
+    }
+
+    private fun cursorPos(node: AccessibilityNodeInfo, len: Int): Int {
+        val e = node.textSelectionEnd
+        return if (e in 0..len) e else len
+    }
+
+    private fun setNodeText(node: AccessibilityNodeInfo, text: String): Boolean {
+        val args = Bundle()
+        args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
+        return node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+    }
+
+    private fun setSelectionRange(node: AccessibilityNodeInfo, s0: Int, e0: Int): Boolean {
+        node.refresh()
+        if (node.textSelectionStart == s0 && node.textSelectionEnd == e0) return true
+        if (!node.isFocused) node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+        val args = Bundle()
+        args.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, s0)
+        args.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, e0)
+        return node.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, args)
+    }
+
+    private fun opCopy(node: AccessibilityNodeInfo, append: Boolean): OpResult {
+        node.refresh()
+        val raw = if (node.isShowingHintText) null else node.text?.toString()
+        val sel = selectionOf(node)
+        val text: String? = if (raw != null && sel != null) {
+            raw.substring(sel.first, sel.second)
+        } else {
+            raw?.takeIf { it.isNotBlank() }
+                ?: node.contentDescription?.toString()?.takeIf { it.isNotBlank() }
+                ?: mergedText(node)
+        }
+        if (text == null) return OpResult(false, "This item has no text that can be copied")
+        if (!append) clipList.clear()
+        clipList.add(text)
+        if (!writeClipboard()) return OpResult(false, "Could not copy")
+        return if (append) {
+            OpResult(true, "Added. The clipboard now has " + clipList.size + " items")
+        } else {
+            OpResult(true, "Copied")
+        }
+    }
+
+    private fun opCut(node: AccessibilityNodeInfo): OpResult {
+        if (!node.isEditable) return OpResult(false, "Cannot cut here, this is not an edit box")
+        node.refresh()
+        val raw = editableText(node)
+        val sel = selectionOf(node) ?: return OpResult(false, "Select some text first")
+        clipList.clear()
+        clipList.add(raw.substring(sel.first, sel.second))
+        if (!writeClipboard()) return OpResult(false, "Could not cut")
+        val newText = raw.substring(0, sel.first) + raw.substring(sel.second)
+        if (!setNodeText(node, newText)) return OpResult(false, "Could not cut")
+        selecting = false
+        setSelectionRange(node, sel.first, sel.first)
+        return OpResult(true, "Cut")
+    }
+
+    private fun opPaste(node: AccessibilityNodeInfo): OpResult {
+        if (!node.isEditable) {
+            return OpResult(false, "Cannot paste here. Focus an edit box and try again")
+        }
+        node.refresh()
+        suppressWindowEventsUntil = System.currentTimeMillis() + 2000
+        node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+        var ok = node.performAction(AccessibilityNodeInfo.ACTION_PASTE)
+        if (!ok && clipList.isNotEmpty()) {
+            // Fallback: write the collected text straight into the box.
+            ok = setNodeText(node, editableText(node) + clipList.joinToString("\n"))
+        }
+        selecting = false
+        return if (ok) OpResult(true, "Pasted") else OpResult(false, "Could not paste")
+    }
+
+    private fun opClear(node: AccessibilityNodeInfo): OpResult {
+        if (!node.isEditable) return OpResult(false, "This is not an edit box")
+        selecting = false
+        return if (setNodeText(node, "")) {
+            OpResult(true, "Edit box cleared")
+        } else {
+            OpResult(false, "Could not clear the edit box")
+        }
+    }
+
+    // ======================= Actions reading-control =======================
+
+    private fun actionsFor(node: AccessibilityNodeInfo): List<EditAction> {
+        return if (node.isEditable) {
+            EditAction.values().toList()
+        } else {
+            listOf(EditAction.COPY, EditAction.APPEND)
+        }
+    }
+
+    private fun actionLabel(a: EditAction): String = when (a) {
+        EditAction.CURSOR_START -> "Move cursor to start"
+        EditAction.CURSOR_END -> "Move cursor to end"
+        EditAction.TOGGLE_SELECT -> if (selecting) "End selection mode" else "Start selection mode"
+        EditAction.COPY -> "Copy"
+        EditAction.APPEND -> "Append, add to what was copied before"
+        EditAction.CUT -> "Cut"
+        EditAction.PASTE -> "Paste"
+        EditAction.CLEAR -> "Clear edit box"
+    }
+
+    private fun stepAction(node: AccessibilityNodeInfo, dir: Int) {
+        val list = actionsFor(node)
+        if (actionIndex >= list.size) actionIndex = -1
+        actionIndex = if (actionIndex < 0) {
+            if (dir > 0) 0 else list.size - 1
+        } else {
+            wrap(actionIndex + dir, list.size)
+        }
+        playSound(soundFocus)
+        speak(actionLabel(list[actionIndex]))
+    }
+
+    private fun runEditAction(node: AccessibilityNodeInfo, a: EditAction): OpResult = when (a) {
+        EditAction.CURSOR_START -> moveCursorToEdge(node, false)
+        EditAction.CURSOR_END -> moveCursorToEdge(node, true)
+        EditAction.TOGGLE_SELECT -> toggleSelectionMode(node)
+        EditAction.COPY -> opCopy(node, false)
+        EditAction.APPEND -> opCopy(node, true)
+        EditAction.CUT -> opCut(node)
+        EditAction.PASTE -> opPaste(node)
+        EditAction.CLEAR -> opClear(node)
+    }
+
+    private fun moveCursorToEdge(node: AccessibilityNodeInfo, toEnd: Boolean): OpResult {
+        node.refresh()
+        val len = editableText(node).length
+        val target = if (toEnd) len else 0
+        val ok: Boolean
+        if (selecting) {
+            val anchor = selAnchor.coerceIn(0, len)
+            selCursor = target
+            ok = setSelectionRange(node, minOf(anchor, target), maxOf(anchor, target))
+        } else {
+            ok = setSelectionRange(node, target, target)
+        }
+        if (!ok) return OpResult(false, "Could not move the cursor")
+        val msg = if (selecting) {
+            if (toEnd) "Selected to the end" else "Selected to the start"
+        } else {
+            if (toEnd) "Cursor at end" else "Cursor at start"
+        }
+        return OpResult(true, msg)
+    }
+
+    private fun toggleSelectionMode(node: AccessibilityNodeInfo): OpResult {
+        if (selecting) {
+            selecting = false
+            return OpResult(true, "Selection mode ended")
+        }
+        node.refresh()
+        val len = editableText(node).length
+        val sel = selectionOf(node)
+        if (sel != null) {
+            selAnchor = sel.first
+            selCursor = sel.second
+        } else {
+            val pos = cursorPos(node, len)
+            selAnchor = pos
+            selCursor = pos
+        }
+        selecting = true
+        return OpResult(true, "Selection mode started. Now choose character, word, line or paragraph, then swipe down or up")
+    }
+
+    private fun speakPiece(piece: String, kind: SplitKind): String {
+        return if (kind == SplitKind.CHAR) speakable(piece) else speakable(piece.trim().ifEmpty { piece })
+    }
+
+    // Moves the cursor of an edit box by one character/word/line/paragraph.
+    // In selection mode the selection grows or shrinks between the anchor and the cursor.
+    private fun cursorStep(node: AccessibilityNodeInfo, kind: SplitKind, dir: Int) {
+        node.refresh()
+        val text = editableText(node)
+        if (text.isEmpty()) {
+            fail("The edit box has no text")
+            return
+        }
+        val from = if (selecting) selCursor.coerceIn(0, text.length) else cursorPos(node, text.length)
+        val to = moveIndex(text, from, kind, dir)
+        if (to == from) {
+            fail(if (dir > 0) "End" else "Start")
+            return
+        }
+        val piece = text.substring(minOf(from, to), maxOf(from, to))
+        val ok: Boolean
+        val message: String
+        if (selecting) {
+            val anchor = selAnchor.coerceIn(0, text.length)
+            selCursor = to
+            ok = setSelectionRange(node, minOf(anchor, to), maxOf(anchor, to))
+            val extending = Math.abs(to - anchor) > Math.abs(from - anchor)
+            message = speakPiece(piece, kind) + (if (extending) " selected" else " deselected")
+        } else {
+            ok = setSelectionRange(node, to, to)
+            message = speakPiece(piece, kind)
+        }
+        if (!ok) {
+            fail("Could not move the cursor")
+            return
+        }
+        playSound(soundFocus)
+        speak(message)
+    }
+
+    private fun moveIndex(text: String, pos: Int, kind: SplitKind, dir: Int): Int {
+        val len = text.length
+        return when (kind) {
+            SplitKind.CHAR -> {
+                val bi = BreakIterator.getCharacterInstance()
+                bi.setText(text)
+                if (dir > 0) {
+                    if (pos >= len) {
+                        len
+                    } else {
+                        val n = bi.following(pos)
+                        if (n == BreakIterator.DONE) len else n
+                    }
+                } else {
+                    if (pos <= 0) {
+                        0
+                    } else {
+                        val n = bi.preceding(pos)
+                        if (n == BreakIterator.DONE) 0 else n
+                    }
+                }
+            }
+            SplitKind.WORD -> {
+                var p = pos
+                if (dir > 0) {
+                    while (p < len && text[p].isWhitespace()) p++
+                    while (p < len && !text[p].isWhitespace()) p++
+                } else {
+                    while (p > 0 && text[p - 1].isWhitespace()) p--
+                    while (p > 0 && !text[p - 1].isWhitespace()) p--
+                }
+                p
+            }
+            SplitKind.LINE -> {
+                if (dir > 0) {
+                    var p = pos
+                    if (p < len && text[p] == '\n') p++
+                    val idx = text.indexOf('\n', p)
+                    if (idx == -1) len else idx
+                } else {
+                    var p = pos
+                    if (p > 0 && text[p - 1] == '\n') p--
+                    val idx = if (p <= 0) -1 else text.lastIndexOf('\n', p - 1)
+                    idx + 1
+                }
+            }
+            SplitKind.PARAGRAPH -> {
+                val para = Regex("\\n\\s*\\n")
+                if (dir > 0) {
+                    val m = para.find(text, pos)
+                    if (m == null) {
+                        len
+                    } else if (m.range.first > pos) {
+                        m.range.first
+                    } else {
+                        val n = para.find(text, m.range.last + 1)
+                        n?.range?.first ?: len
+                    }
+                } else {
+                    var best = 0
+                    for (m in para.findAll(text)) {
+                        val st = m.range.last + 1
+                        if (st < pos) best = st
+                    }
+                    best
+                }
+            }
+        }
+    }
+
+    // ======================= Accessibility volume =======================
+
+    private fun isInputMethodEvent(event: AccessibilityEvent): Boolean {
+        return try {
+            windows.any { it.id == event.windowId && it.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD }
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    // Volume keys pressed while a finger is held on the screen change the
+    // accessibility (speech) volume; otherwise they change media volume as usual.
+    override fun onKeyEvent(event: KeyEvent): Boolean {
+        val code = event.keyCode
+        if (gamingActive && (code == KeyEvent.KEYCODE_VOLUME_UP || code == KeyEvent.KEYCODE_VOLUME_DOWN)) {
+            val down = event.action == KeyEvent.ACTION_DOWN
+            if (code == KeyEvent.KEYCODE_VOLUME_UP) volUpHeld = down else volDownHeld = down
+            if (volUpHeld && volDownHeld) {
+                volUpHeld = false
+                volDownHeld = false
+                gamingSuppressedPackage = lastForegroundPackage
+                exitGaming()
+                return true
+            }
+            return false
+        }
+        if (touching && (code == KeyEvent.KEYCODE_VOLUME_UP || code == KeyEvent.KEYCODE_VOLUME_DOWN)) {
+            if (event.action == KeyEvent.ACTION_DOWN) {
+                adjustAccessibilityVolume(code == KeyEvent.KEYCODE_VOLUME_UP)
+            }
+            return true
+        }
+        return false
+    }
+
+    private fun adjustAccessibilityVolume(up: Boolean) {
+        try {
+            val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            am.adjustStreamVolume(
+                accessibilityStream,
+                if (up) AudioManager.ADJUST_RAISE else AudioManager.ADJUST_LOWER,
+                AudioManager.FLAG_SHOW_UI
+            )
+            val max = am.getStreamMaxVolume(accessibilityStream)
+            val cur = am.getStreamVolume(accessibilityStream)
+            val percent = if (max > 0) cur * 100 / max else 0
+            speak("Accessibility volume " + percent + " percent")
+        } catch (e: Exception) {
+            fail("Could not change the accessibility volume")
+        }
+    }
+
+    private fun startSelect() {
+        if (targetText() == null) return
+        mode = Mode.UNIT_CHOOSER
+        unitIndex = 0
+        playSound(soundFocus)
+        speak("Which unit do you want to select by? " + unitLabels[0])
+    }
+
+    private fun splitText(text: String, kind: SplitKind, includeBlank: Boolean = false): List<String> {
+        return when (kind) {
+            SplitKind.CHAR -> {
+                val out = mutableListOf<String>()
+                val bi = BreakIterator.getCharacterInstance()
+                bi.setText(text)
+                var start = bi.first()
+                var end = bi.next()
+                while (end != BreakIterator.DONE) {
+                    val piece = text.substring(start, end)
+                    if (includeBlank || piece.isNotBlank()) out.add(piece)
+                    start = end
+                    end = bi.next()
+                }
+                out
+            }
+            SplitKind.WORD -> text.split(Regex("\\s+")).filter { it.isNotEmpty() }
+            SplitKind.LINE -> text.split(Regex("\\r?\\n")).map { it.trim() }.filter { it.isNotEmpty() }
+            SplitKind.PARAGRAPH -> text.split(Regex("\\r?\\n\\s*\\r?\\n")).map { it.trim() }.filter { it.isNotEmpty() }
+        }
+    }
+
+    private fun beginItemSelect(kind: SplitKind) {
+        val text = targetText() ?: return
+        val units = splitText(text, kind)
+        if (units.isEmpty()) {
+            fail("Nothing found to select")
+            return
+        }
+        splitKind = kind
+        selectUnits = units
+        selectedFlags = BooleanArray(units.size)
+        selectIndex = 0
+        mode = Mode.ITEM_SELECT
+        playSound(soundActivate)
+        speak(
+            "" + units.size + " " + unitLabels[kind.ordinal] + "s found. Swipe left or right, " +
+                "double tap to select or deselect, and at the end there are Copy and Append options. " +
+                describeSelectEntry(0)
+        )
+    }
+
+    private fun speakable(piece: String): String = when (piece) {
+        " " -> "space"
+        "\n", "\r\n" -> "new line"
+        "\t" -> "tab"
+        else -> piece
+    }
+
+    private fun describeSelectEntry(i: Int): String {
+        val n = selectUnits.size
+        return when {
+            i < n -> speakable(selectUnits[i]) + ", " + (if (selectedFlags[i]) "selected" else "not selected")
+            i == n -> "Copy"
+            else -> "Append, add to what was copied before"
+        }
+    }
+
+    private fun toggleSelected(i: Int) {
+        selectedFlags[i] = !selectedFlags[i]
+        playSound(soundActivate)
+        speak(speakable(selectUnits[i]) + (if (selectedFlags[i]) " selected" else " deselected"))
+    }
+
+    private fun copySelection(append: Boolean) {
+        val picked = selectUnits.filterIndexed { i, _ -> selectedFlags[i] }
+        if (picked.isEmpty()) {
+            fail("Nothing has been selected yet")
+            return
+        }
+        val separator = when (splitKind) {
+            SplitKind.CHAR -> ""
+            SplitKind.WORD -> " "
+            SplitKind.LINE -> "\n"
+            SplitKind.PARAGRAPH -> "\n\n"
+        }
+        if (!append) clipList.clear()
+        clipList.add(picked.joinToString(separator))
+        if (writeClipboard()) {
+            finish(
+                if (append) "Added. The clipboard now has " + clipList.size + " items"
+                else "" + picked.size + " selected parts copied"
+            )
+        } else {
+            fail("Could not copy")
+        }
+    }
+
+    override fun onInterrupt() {
+        // Required override - nothing to clean up mid-interrupt for v1.
+    }
+
+    override fun onDestroy() {
+        prefsListener?.let {
+            getSharedPreferences("screen_reader_prefs", Context.MODE_PRIVATE)
+                .unregisterOnSharedPreferenceChangeListener(it)
+        }
+        handler.removeCallbacksAndMessages(null)
+        aiExecutor.shutdown()
+        tts?.shutdown()
+        soundPool?.release()
+        super.onDestroy()
+    }
+}
+@@@FILE app/src/main/java/com/mohit/screenreader/SoundSchemeActivity.kt lines=73
+package com.mohit.screenreader
+
+import android.content.Context
+import android.media.MediaPlayer
+import android.os.Bundle
+import android.speech.tts.TextToSpeech
+import android.widget.Button
+import android.widget.Toast
+
+class SoundSchemeActivity : android.app.Activity() {
+
+    private var tts: TextToSpeech? = null
+    private var previewPlayer: MediaPlayer? = null
+
+    // Folder name inside app/src/main/assets/ where the build workflow unpacks
+    // IPhone_voice_Over.zip. Only one scheme exists right now, so it is the
+    // default; more schemes (and this picker becoming a real list) come later.
+    private val schemeId = "iphone_voiceover"
+    private val schemeAssetFolder = "sound_iphone_voiceover"
+    private val previewFile = "click.ogg"
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_sound_scheme)
+
+        tts = TextToSpeech(this) { }
+
+        // The scheme is already the saved default, but tapping still confirms
+        // it out loud and lets him preview one sound from it.
+        findViewById<Button>(R.id.btnSchemeIphone).setOnClickListener {
+            saveChosenScheme()
+            speak("iPhone VoiceOver sound scheme selected")
+            playPreview()
+        }
+
+        saveChosenScheme()
+    }
+
+    private fun saveChosenScheme() {
+        getSharedPreferences("screen_reader_prefs", Context.MODE_PRIVATE)
+            .edit()
+            .putString("sound_scheme", schemeId)
+            .apply()
+    }
+
+    private fun speak(text: String) {
+        tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "sound_scheme_confirm")
+    }
+
+    private fun playPreview() {
+        try {
+            previewPlayer?.release()
+            val afd = assets.openFd("$schemeAssetFolder/$previewFile")
+            previewPlayer = MediaPlayer().apply {
+                setDataSource(afd.fileDescriptor, afd.startOffset, afd.length)
+                afd.close()
+                prepare()
+                start()
+            }
+        } catch (e: Exception) {
+            // Sound file not found in this build yet (e.g. the zip was not
+            // unpacked) - say so out loud, since a Toast alone can be missed.
+            speak("Sample sound file not found. The sound scheme was not bundled correctly in this build.")
+            Toast.makeText(this, "Sample sound file not found", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    override fun onDestroy() {
+        tts?.shutdown()
+        previewPlayer?.release()
+        super.onDestroy()
+    }
+}
+@@@FILE app/src/main/java/com/mohit/screenreader/TtsEngineActivity.kt lines=84
+package com.mohit.screenreader
+
+import android.content.Context
+import android.content.Intent
+import android.os.Bundle
+import android.speech.tts.TextToSpeech
+import android.widget.ArrayAdapter
+import android.widget.Button
+import android.widget.ListView
+import android.widget.TextView
+import android.widget.Toast
+
+class TtsEngineActivity : android.app.Activity() {
+
+    private var probeTts: TextToSpeech? = null
+    private var testTts: TextToSpeech? = null
+    private lateinit var txtStatus: TextView
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_tts_engine)
+        txtStatus = findViewById(R.id.txtStatus)
+
+        findViewById<Button>(R.id.btnTtsSettings).setOnClickListener {
+            startActivity(Intent(this, TtsSettingsActivity::class.java))
+        }
+
+        // A throwaway TextToSpeech instance just so we can ask it which engines
+        // exist on this device. Android 11+ (including Android 13) only shows
+        // engines beyond Google's if this app declares the TTS_SERVICE <queries>
+        // entry in AndroidManifest.xml - that entry is already in place.
+        probeTts = TextToSpeech(this) { }
+        probeTts?.let { showEngines(it) }
+    }
+
+    private fun showEngines(tts: TextToSpeech) {
+        val engines = tts.engines
+        if (engines.isNullOrEmpty()) {
+            txtStatus.text = "No text-to-speech engine found."
+            return
+        }
+
+        val labels = engines.map { it.label }
+        txtStatus.text = "Tap an engine to choose it (total " + engines.size + "):"
+
+        val listView = findViewById<ListView>(R.id.listEngines)
+        listView.adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, labels)
+        listView.setOnItemClickListener { _, _, position, _ ->
+            val chosen = engines[position]
+            saveChosenEngine(chosen.name)
+            testEngine(chosen.name, chosen.label)
+        }
+    }
+
+    private fun saveChosenEngine(enginePackage: String) {
+        getSharedPreferences("screen_reader_prefs", Context.MODE_PRIVATE)
+            .edit()
+            .putString("tts_engine_package", enginePackage)
+            .apply()
+    }
+
+    private fun testEngine(enginePackage: String, label: String) {
+        testTts?.shutdown()
+        testTts = TextToSpeech(this, { status ->
+            if (status == TextToSpeech.SUCCESS) {
+                testTts?.speak(
+                    "$label selected. This engine will now be used by your screen reader.",
+                    TextToSpeech.QUEUE_FLUSH,
+                    null,
+                    "tts_engine_test"
+                )
+                Toast.makeText(this, "$label selected", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(this, "This engine could not start, please try another one", Toast.LENGTH_LONG).show()
+            }
+        }, enginePackage)
+    }
+
+    override fun onDestroy() {
+        probeTts?.shutdown()
+        testTts?.shutdown()
+        super.onDestroy()
+    }
+}
+@@@FILE app/src/main/java/com/mohit/screenreader/TtsSettingsActivity.kt lines=112
+package com.mohit.screenreader
+
+import android.content.Context
+import android.media.AudioAttributes
+import android.os.Bundle
+import android.speech.tts.TextToSpeech
+import android.widget.Button
+import android.widget.TextView
+
+/**
+ * Text-to-speech settings: speed and volume of the speech engine.
+ * Uses plain buttons (not sliders) so it works with double tap alone.
+ * Values are saved in screen_reader_prefs; the running screen reader service
+ * watches those and applies changes immediately.
+ */
+class TtsSettingsActivity : android.app.Activity() {
+
+    private var tts: TextToSpeech? = null
+    private var ttsReady = false
+    private lateinit var txtRate: TextView
+    private lateinit var txtVolume: TextView
+    private var rate = 1.0f
+    private var volume = 1.0f
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_tts_settings)
+        txtRate = findViewById(R.id.txtRate)
+        txtVolume = findViewById(R.id.txtVolume)
+
+        val prefs = getSharedPreferences("screen_reader_prefs", Context.MODE_PRIVATE)
+        rate = prefs.getFloat("tts_rate", 1.0f)
+        volume = prefs.getFloat("tts_volume", 1.0f)
+        val enginePackage = prefs.getString("tts_engine_package", null)
+        showValues()
+
+        val initListener = TextToSpeech.OnInitListener { status ->
+            if (status == TextToSpeech.SUCCESS) {
+                tts?.setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build()
+                )
+                ttsReady = true
+            }
+        }
+        tts = if (enginePackage != null) {
+            TextToSpeech(this, initListener, enginePackage)
+        } else {
+            TextToSpeech(this, initListener)
+        }
+
+        findViewById<Button>(R.id.btnRateUp).setOnClickListener { changeRate(0.25f) }
+        findViewById<Button>(R.id.btnRateDown).setOnClickListener { changeRate(-0.25f) }
+        findViewById<Button>(R.id.btnVolUp).setOnClickListener { changeVolume(0.1f) }
+        findViewById<Button>(R.id.btnVolDown).setOnClickListener { changeVolume(-0.1f) }
+        findViewById<Button>(R.id.btnTest).setOnClickListener {
+            speakTest("This is your text-to-speech voice")
+        }
+    }
+
+    private fun rateText(): String = "Speed: " + rate + " times"
+
+    private fun volumeText(): String = "Text to speech volume: " + Math.round(volume * 100) + " percent"
+
+    private fun showValues() {
+        txtRate.text = rateText()
+        txtVolume.text = volumeText()
+    }
+
+    private fun save() {
+        getSharedPreferences("screen_reader_prefs", Context.MODE_PRIVATE)
+            .edit()
+            .putFloat("tts_rate", rate)
+            .putFloat("tts_volume", volume)
+            .apply()
+    }
+
+    private fun changeRate(delta: Float) {
+        rate = Math.round((rate + delta) * 100) / 100f
+        if (rate < 0.5f) rate = 0.5f
+        if (rate > 3.0f) rate = 3.0f
+        save()
+        showValues()
+        speakTest(rateText())
+    }
+
+    private fun changeVolume(delta: Float) {
+        volume = Math.round((volume + delta) * 10) / 10f
+        if (volume < 0.1f) volume = 0.1f
+        if (volume > 1.0f) volume = 1.0f
+        save()
+        showValues()
+        speakTest(volumeText())
+    }
+
+    // Speaks with the current speed and volume so the change can be heard right away.
+    private fun speakTest(text: String) {
+        val engine = tts
+        if (engine == null || !ttsReady) return
+        engine.setSpeechRate(rate)
+        val params = Bundle()
+        params.putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, volume)
+        engine.speak(text, TextToSpeech.QUEUE_FLUSH, params, "tts_settings_test")
+    }
+
+    override fun onDestroy() {
+        tts?.shutdown()
+        super.onDestroy()
+    }
+}
+@@@FILE app/src/main/res/layout/activity_api_key.xml lines=47
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="24dp">
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textSize="20sp"
+        android:layout_marginBottom="16dp"
+        android:text="Paste your Google Gemini API key below and tap Save. It is stored only on this phone and is used for the AI menu (Describe screen and Describe image)." />
+
+    <TextView
+        android:id="@+id/txtKeyStatus"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textSize="18sp"
+        android:layout_marginBottom="16dp" />
+
+    <EditText
+        android:id="@+id/edtApiKey"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textSize="18sp"
+        android:layout_marginBottom="16dp"
+        android:inputType="text|textNoSuggestions"
+        android:singleLine="true"
+        android:hint="Gemini API key" />
+
+    <Button
+        android:id="@+id/btnSaveKey"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="16dp"
+        android:textSize="20sp"
+        android:text="Save API key" />
+
+    <Button
+        android:id="@+id/btnRemoveKey"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textSize="20sp"
+        android:text="Remove saved API key" />
+
+</LinearLayout>
+@@@FILE app/src/main/res/layout/activity_autoclick_edit.xml lines=62
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="24dp">
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textSize="18sp"
+            android:layout_marginBottom="12dp"
+            android:text="Give the function a name. Then paste the items to click, one per line, in the order they should be clicked. Tip: copy each item with Copy and Append in the Screen reader menu, then paste them all here." />
+
+        <EditText
+            android:id="@+id/edtMacroName"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textSize="18sp"
+            android:layout_marginBottom="12dp"
+            android:inputType="text"
+            android:hint="Function name" />
+
+        <EditText
+            android:id="@+id/edtMacroSteps"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textSize="18sp"
+            android:layout_marginBottom="12dp"
+            android:gravity="top"
+            android:minLines="6"
+            android:inputType="textMultiLine"
+            android:hint="Items to click, one per line" />
+
+        <TextView
+            android:id="@+id/txtMacroStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textSize="18sp"
+            android:layout_marginBottom="12dp" />
+
+        <Button
+            android:id="@+id/btnSaveMacro"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="12dp"
+            android:textSize="20sp"
+            android:text="Save function" />
+
+        <Button
+            android:id="@+id/btnDeleteMacro"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textSize="20sp"
+            android:text="Delete function" />
+
+    </LinearLayout>
+</ScrollView>
+@@@FILE app/src/main/res/layout/activity_autoclick_list.xml lines=22
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="16dp">
+
+    <Button
+        android:id="@+id/btnNewMacro"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="12dp"
+        android:textSize="20sp"
+        android:text="Create new function" />
+
+    <ListView
+        android:id="@+id/listMacros"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1" />
+
+</LinearLayout>
+@@@FILE app/src/main/res/layout/activity_customize_list.xml lines=21
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="16dp">
+
+    <TextView
+        android:id="@+id/txtCustomizeInfo"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textSize="18sp"
+        android:layout_marginBottom="12dp" />
+
+    <ListView
+        android:id="@+id/listCustomize"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1" />
+
+</LinearLayout>
+@@@FILE app/src/main/res/layout/activity_extensions.xml lines=23
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="24dp">
+
+    <CheckBox
+        android:id="@+id/chkYoutubeSkip"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="16dp"
+        android:textSize="20sp"
+        android:text="YouTube: skip ads automatically" />
+
+    <Button
+        android:id="@+id/btnAutoClick"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textSize="20sp"
+        android:text="Auto click functions" />
+
+</LinearLayout>
+@@@FILE app/src/main/res/layout/activity_gaming_apps.xml lines=21
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="16dp">
+
+    <TextView
+        android:id="@+id/txtGamingStatus"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textSize="18sp"
+        android:layout_marginBottom="12dp" />
+
+    <ListView
+        android:id="@+id/listApps"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1" />
+
+</LinearLayout>
+@@@FILE app/src/main/res/layout/activity_gesture_settings.xml lines=29
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="16dp">
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textSize="18sp"
+        android:layout_marginBottom="12dp"
+        android:text="Tap a gesture to choose what it does." />
+
+    <Button
+        android:id="@+id/btnResetGestures"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="12dp"
+        android:textSize="18sp"
+        android:text="Reset all gestures to default" />
+
+    <ListView
+        android:id="@+id/listGestures"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1" />
+
+</LinearLayout>
+@@@FILE app/src/main/res/layout/activity_main.xml lines=94
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="24dp">
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="@string/app_name"
+        android:textSize="26sp"
+        android:layout_marginBottom="24dp" />
+
+    <Button
+        android:id="@+id/btnTts"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="16dp"
+        android:textSize="20sp"
+        android:text="@string/tts_button" />
+
+    <Button
+        android:id="@+id/btnTtsSettings"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="16dp"
+        android:textSize="20sp"
+        android:text="@string/tts_settings_button" />
+
+    <Button
+        android:id="@+id/btnSound"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="16dp"
+        android:textSize="20sp"
+        android:text="@string/sound_button" />
+
+    <Button
+        android:id="@+id/btnGestures"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="16dp"
+        android:textSize="20sp"
+        android:text="@string/gesture_button" />
+
+    <Button
+        android:id="@+id/btnCustomizeMenu"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="16dp"
+        android:textSize="20sp"
+        android:text="@string/customize_menu_button" />
+
+    <Button
+        android:id="@+id/btnCustomizeReading"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="16dp"
+        android:textSize="20sp"
+        android:text="@string/customize_reading_button" />
+
+    <Button
+        android:id="@+id/btnExtensions"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="16dp"
+        android:textSize="20sp"
+        android:text="@string/extensions_button" />
+
+    <Button
+        android:id="@+id/btnGaming"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="16dp"
+        android:textSize="20sp"
+        android:text="@string/gaming_button" />
+
+    <Button
+        android:id="@+id/btnSettings"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="16dp"
+        android:textSize="20sp"
+        android:text="@string/settings_button" />
+
+    <Button
+        android:id="@+id/btnApiKey"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textSize="20sp"
+        android:text="@string/api_key_button" />
+
+</LinearLayout>
+@@@FILE app/src/main/res/layout/activity_sound_scheme.xml lines=22
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="16dp">
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textSize="18sp"
+        android:paddingBottom="16dp"
+        android:text="Available sound schemes:" />
+
+    <Button
+        android:id="@+id/btnSchemeIphone"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textSize="20sp"
+        android:text="iPhone VoiceOver sound scheme (default, selected)" />
+
+</LinearLayout>
+@@@FILE app/src/main/res/layout/activity_tts_engine.xml lines=29
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="16dp">
+
+    <TextView
+        android:id="@+id/txtStatus"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textSize="18sp"
+        android:paddingBottom="12dp"
+        android:text="Searching for engines..." />
+
+    <Button
+        android:id="@+id/btnTtsSettings"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="12dp"
+        android:textSize="18sp"
+        android:text="@string/tts_settings_button" />
+
+    <ListView
+        android:id="@+id/listEngines"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+
+</LinearLayout>
+@@@FILE app/src/main/res/layout/activity_tts_settings.xml lines=64
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="16dp">
+
+        <TextView
+            android:id="@+id/txtRate"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textSize="20sp"
+            android:paddingBottom="8dp" />
+
+        <Button
+            android:id="@+id/btnRateUp"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textSize="18sp"
+            android:text="Increase speed" />
+
+        <Button
+            android:id="@+id/btnRateDown"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="20dp"
+            android:textSize="18sp"
+            android:text="Decrease speed" />
+
+        <TextView
+            android:id="@+id/txtVolume"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textSize="20sp"
+            android:paddingBottom="8dp" />
+
+        <Button
+            android:id="@+id/btnVolUp"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textSize="18sp"
+            android:text="Increase text to speech volume" />
+
+        <Button
+            android:id="@+id/btnVolDown"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="20dp"
+            android:textSize="18sp"
+            android:text="Decrease text to speech volume" />
+
+        <Button
+            android:id="@+id/btnTest"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textSize="18sp"
+            android:text="Test the voice" />
+
+    </LinearLayout>
+</ScrollView>
+@@@FILE app/src/main/res/values/strings.xml lines=14
+<resources>
+    <string name="app_name">My Screen Reader</string>
+    <string name="tts_button">Choose text-to-speech engine</string>
+    <string name="sound_button">Choose sound scheme</string>
+    <string name="settings_button">Turn on accessibility service</string>
+    <string name="accessibility_service_description">This service lets you navigate items on the screen by swiping left and right, and activate them with a double tap.</string>
+    <string name="tts_settings_button">Text to speech settings (speed and volume)</string>
+    <string name="api_key_button">Add API key</string>
+    <string name="gaming_button">Gaming mode apps</string>
+    <string name="gesture_button">Gesture settings</string>
+    <string name="customize_menu_button">Customize screen reader menu</string>
+    <string name="customize_reading_button">Customize reading controls</string>
+    <string name="extensions_button">Extensions</string>
+</resources>
+@@@FILE app/src/main/res/xml/accessibility_service_config.xml lines=11
+<?xml version="1.0" encoding="utf-8"?>
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeAllMask"
+    android:accessibilityFeedbackType="feedbackSpoken"
+    android:accessibilityFlags="flagRequestTouchExplorationMode|flagRetrieveInteractiveWindows|flagReportViewIds|flagServiceHandlesDoubleTap|flagRequestFilterKeyEvents"
+    android:canRequestTouchExplorationMode="true"
+    android:canRequestFilterKeyEvents="true"
+    android:canRetrieveWindowContent="true"
+    android:canTakeScreenshot="true"
+    android:description="@string/accessibility_service_description"
+    android:notificationTimeout="80" />
+@@@FILE build.gradle lines=17
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath "com.android.tools.build:gradle:8.5.0"
+        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:1.9.24"
+    }
+}
+
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+@@@FILE gradle.properties lines=4
+org.gradle.jvmargs=-Xmx2048m
+android.useAndroidX=true
+android.nonTransitiveRClass=true
+kotlin.code.style=official
+@@@FILE settings.gradle lines=2
+include ':app'
+rootProject.name = "MyScreenReader"
+@@@FILE debug.keystore.b64 lines=47
+MIIKZgIBAzCCChAGCSqGSIb3DQEHAaCCCgEEggn9MIIJ+TCCBcAGCSqGSIb3DQEHAaCCBbEEggWt
+MIIFqTCCBaUGCyqGSIb3DQEMCgECoIIFQDCCBTwwZgYJKoZIhvcNAQUNMFkwOAYJKoZIhvcNAQUM
+MCsEFA4p5kw5aJ4g0E+7xl91nTdj8FT1AgInEAIBIDAMBggqhkiG9w0CCQUAMB0GCWCGSAFlAwQB
+KgQQ7WzmxIGUHeRu8HWxhUPSCgSCBND+CBSa7o7n+6oQkGxYnDuU9WR1PxeKK77jnxHKdEWBe2ys
+J1ysxWsSTXgYNOv4qOPTGPtcULCuEdHSMst6pLlfni8lYoPh+n8+q+OoFbdNeKkwG66uuewEiT+p
+wkOREP7/v5jLacnZmaQI6nv+6PKUf5Vbloo+MaOSbnz4WJp1EQ/vMzV064EIy/wfMMNQlbOabeDy
+kSfTmfqUvRJqjeHDNEuEhjt0QGtXGgHnE9Yy+Jy1BFuEI/UuaHaAHaNjYnhHpsGQQjlPTe7egZoq
+nXEdtcFtV9Wkzl6jF8MA04Gdwrnpr7Gjkg9f2UB3dchNWVObVbEYj8ZXyhwIo5ozLpOzDt9wufHF
+Zw+FSXjnGFEOLk3dDQxeHRhBEXqRy335Hq+XwgEGKiZuHLKShZdFAxiZVZCrHnhuD/hpxQMe4Zx/
+RoR+N6MmvB4Wf0W/3KclaNdITX+Lc+J60f1o9lKKqILXCcwSsy9HTNkQUghcAxqELCtj/jXqVvTA
+NNyjo5/FkgFvNqnz1LOH2F6oEYs5Qu5QWKkOpsRyKH7z8/AYQxirvRWZiVguUpPwcDurAbMZ0rLf
+FXQxh3OV2dHASTKOGt8jYZU4lX2N/gdLxw+3pivkCwcxnRRbYYE/OlyPSFAptb4olh04XH12ABHY
+GGIzY+Z/bwuCC6XH1w5Am6bFPRpIPRmWwikZ9TQ2KNVYwvjWLimqWXwN5x4V/QflrsoKqHk7x4Se
+0JV915mwhZOg4CS+Llkd7ESIRewf68idem1XpuKA++xUX2Gmn/1zMwExdEyOoVUAZ2kurLiNS71o
+qYz/c9JmEkJfIYvmAPsWcfhMQC+iAsIcBIfB0onbodHzPi1U/h+h3hAYYB8SoMeUcb1XseG/kg7C
+OnPYtvTA9gDAeWtmbveQCDFHLZANqql+vdXKRvGs73bQrty8iwELKxOaNQzeTyUgVQ3O5T/jDcrg
+HFzFpSPEdiZ7cExAzYU/g2xi+/3Yu6vaNSv00YH11DTFYdufLem+N1FLKob+NQqwcfJU85WqaMNx
+uh7qTYOjpzjI0dIaUl9N4S0z+gbh8/ccIeieZJ3TuWAhfRH/Quovy96Ha/NjtjtJUO0mAYHqP+WI
+ypNUaDDOiZL7Dh1pk7Kk9PbWr0nlAwE+j4411iDjIN7xibXz0EtfqBpYdtlJ0G4bZwqaFGq441L+
+67cLtNLIJK+6Wzj2ggtiQ2woeqn9+V3nHWOx0VmunVG6IBDl6fHwdYCg9HJBXIJvWYj/2+HQigJM
+BiPTR4xI/C3QX34ItDbE+QWt9dDgN9MZepQ1WCroJur+t7EDYfSy4fxhVCBtB1+enbxTfdcrA39R
+9lAVVYWGq5WsHvpCaa9RR7i4MzJA9xNnHYYrfg79HLQPfIrGO3XRefC4RfC4zrXRIMQQf1QWVsKU
+MRkp5TYdxFSHg4fBaYBQE+2Xzu2I9WW5Ge7HebGgV3Bv82E9ZgmFqMGQFZSBNFkH5CgzLMaZnbbJ
+cYULZxnFdT/iab9WMUKkcvAqANxTh0vPslDXmTe18DmLh41O0DhYKTghyul6VZc2CNaWiabYRim+
+mmNwOkoEqqDhGyecbPzpeOGluOSRWcX7Uot7emJUXubM3n7AbAX20myrkIxcxwQlQpPDud+OnQN5
+EDFSMC0GCSqGSIb3DQEJFDEgHh4AYQBuAGQAcgBvAGkAZABkAGUAYgB1AGcAawBlAHkwIQYJKoZI
+hvcNAQkVMRQEElRpbWUgMTc5MDQ5MzAwMTIzOTCCBDEGCSqGSIb3DQEHBqCCBCIwggQeAgEAMIIE
+FwYJKoZIhvcNAQcBMGYGCSqGSIb3DQEFDTBZMDgGCSqGSIb3DQEFDDArBBS01z4Z9APCm4o1omBu
+qWMyfxzsRAICJxACASAwDAYIKoZIhvcNAgkFADAdBglghkgBZQMEASoEELGoL+XPpZXKiVzmGw9B
+AQGAggOgzh+Bs4XyqjEyiOeKPX99cSOcOYRfxijjc6GyzrnpvHYaKiT/ZhRio0n0ZS1kAQWtvwqC
+epVAsrjUg2QNrItAjnWD5RE/KL1FdFLZDAKZiHVNU1O2wrT04ARwPpNsLU6Szp5bInQA3q9JL6vb
++4xvjIIpuXzg3XIXJFHY0/6oUEPS9MVFBP4V3heV8IkR4jiJ/jchyVdDhCp7QN+vB37iJ7s+kLbV
+z8PBFfRjUztgOKXUAw+ksvXbRzUEIufsgWJKbCaP2dkq59K4HDoiPXq2CXrbzvp8quZNto973dNV
+15ZQPFw9FpDkQhmbAjbF417QxrDHTF4SQ18rnNgk6YK8BYYWVPynnrMGXhlMI9TQOEpt80hHt7zq
+pDWvMVzrmg4/TO4kE/rBVpl4MSH7/bFJMVCX5sVDoKlcwiF5CcTAjo8rJ9MYXtDgFFIKaUJZlbjs
+YucFZoGjmSLo2BnJYWZVE1Sax5WljXY1U9YWGXuaGRawQpb70Zba4mprmSoadoephyQOMd0iLNEp
+Vz3GUcX7mokI8PqvzD6gpoT3LBJb/rJV4R8YbGwiaz9APnKShs/tRPeEVz2zspaWh0NlGgECt5yX
+p72vtdMJzk/Zza8agkrP8cjzXbThbj9vAMNNfU3yt1Q04vQAF3CgBCtqEt0OHvO2saXxRrDL8f/9
+qwISEX4Zrm3TlLSszPwYr6C5ar79HahKczACqdvAShRbKb2dwMrOUaOdUIRRT8S5u7fgtqfEeRPr
+GU7Lki/gP3YwzUbdh73DQu0jmnQLxDI2keO0oq9mXBEwmmFOrRAXS5lRbErJYn8CH4s4GP5SiGdj
+0Ct43A2qxh5gRkrX4uwh4AAldAjlDyQ7+IXwxFYKV/hcc+WqPMkYyLp44wH/lW32/+1Okx296tme
+QnUMTw4UYth1iVvWtPQ2MOHxuJVdi3w+KkRtfXXaNWLcAbily3lIAXhVE8SBp3Z7w9aRUHHJMd4a
+xA9Mw+2rHTKzhBXTtfWBIQszYkpu0gzkqC2My9nQ4PeyNtTRKtjYLQA7lryuQ7BqHNMBE5akv9k5
+XehhiM8td5vR5qBCHY+YMfra10tTy/xgRNRrrRcNNHSbWQAecXeCqdb08bvLZTndI3VLCqEQ2ymD
+I40dle7liPR7vO1czU8olsKzCkWEl52/MBGYRU0qbsVSXODURYJtUaNw6LwLIiFB6wI/FWcJbZRM
+swaeaoenTYwaj+jMx9zsBQPwNy6K9DBNMDEwDQYJYIZIAWUDBAIBBQAEILjKwwGnepKQjMXxBdZP
+DhLirhayEya0aFKSsRRHBYXdBBQYPkjlQTH4cXmwB9zwwKolA13UHAICJxA=
+@@@END count=33
