@@ -1,4 +1,4 @@
-@@@BUNDLE version=15
+@@@BUNDLE version=16
 @@@FILE app/build.gradle lines=48
 apply plugin: 'com.android.application'
 apply plugin: 'kotlin-android'
@@ -48,7 +48,7 @@ android {
 dependencies {
     implementation "org.jetbrains.kotlin:kotlin-stdlib:1.9.24"
 }
-@@@FILE app/src/main/AndroidManifest.xml lines=96
+@@@FILE app/src/main/AndroidManifest.xml lines=106
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
@@ -59,6 +59,9 @@ dependencies {
     <queries>
         <intent>
             <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
         </intent>
     </queries>
 
@@ -109,6 +112,13 @@ dependencies {
         <activity
             android:name=".AutoClickEditActivity"
             android:exported="false" />
+
+        <activity
+            android:name=".TranslateActivity"
+            android:exported="false"
+            android:label="Translate"
+            android:windowSoftInputMode="stateVisible|adjustResize"
+            android:theme="@android:style/Theme.DeviceDefault.Dialog" />
 
         <activity
             android:name=".MicPermissionActivity"
@@ -330,7 +340,7 @@ class AutoClickListActivity : Activity() {
         adapter.notifyDataSetChanged()
     }
 }
-@@@FILE app/src/main/java/com/mohit/screenreader/Customization.kt lines=77
+@@@FILE app/src/main/java/com/mohit/screenreader/Customization.kt lines=79
 package com.mohit.screenreader
 
 import android.content.SharedPreferences
@@ -349,7 +359,9 @@ object MenuConfig {
         "select" to "Select",
         "clear" to "Clear edit box",
         "ai" to "AI menu",
-        "extensions" to "Extensions"
+        "extensions" to "Extensions",
+        "translate" to "Translate",
+        "assistant" to "Voice assistant"
     )
 
     val readingItems: List<Pair<String, String>> = listOf(
@@ -560,7 +572,136 @@ class GamingAppsActivity : Activity() {
         status.text = "Tick the apps that should use gaming mode. Apps detected as games are already ticked; untick one to turn it off."
     }
 }
-@@@FILE app/src/main/java/com/mohit/screenreader/GestureConfig.kt lines=99
+@@@FILE app/src/main/java/com/mohit/screenreader/GeminiClient.kt lines=128
+package com.mohit.screenreader
+
+import android.content.Context
+import java.net.HttpURLConnection
+import java.net.URL
+import org.json.JSONArray
+import org.json.JSONObject
+
+// Text-only Gemini calls with automatic fallback between models.
+object GeminiClient {
+
+    class Result(val ok: Boolean, val text: String)
+
+    private class Attempt(val ok: Boolean, val text: String, val next: Boolean, val busy: Boolean)
+
+    private val known = listOf(
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-lite",
+        "gemini-flash-latest",
+        "gemini-flash-lite-latest",
+        "gemini-2.0-flash",
+        "gemini-2.0-flash-lite"
+    )
+
+    val languages = listOf(
+        "English", "Hindi", "Urdu", "Punjabi", "Marathi", "Gujarati", "Bengali", "Tamil", "Telugu",
+        "Kannada", "Malayalam", "Odia", "Assamese", "Nepali", "Sanskrit", "Spanish", "French", "German",
+        "Arabic", "Chinese", "Japanese", "Korean", "Russian", "Portuguese", "Italian", "Indonesian", "Turkish"
+    )
+
+    private fun tryModel(model: String, key: String, prompt: String): Attempt {
+        try {
+            val url = URL("https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent")
+            val conn = url.openConnection() as HttpURLConnection
+            conn.requestMethod = "POST"
+            conn.connectTimeout = 20000
+            conn.readTimeout = 60000
+            conn.doOutput = true
+            conn.setRequestProperty("Content-Type", "application/json")
+            conn.setRequestProperty("x-goog-api-key", key)
+            val parts = JSONArray().put(JSONObject().put("text", prompt))
+            val body = JSONObject().put("contents", JSONArray().put(JSONObject().put("parts", parts)))
+            conn.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
+
+            val code = conn.responseCode
+            val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+            val resp = stream?.bufferedReader()?.use { it.readText() } ?: ""
+            conn.disconnect()
+
+            if (code in 200..299) {
+                val out = StringBuilder()
+                val cands = JSONObject(resp).optJSONArray("candidates")
+                val partsOut = cands?.optJSONObject(0)?.optJSONObject("content")?.optJSONArray("parts")
+                if (partsOut != null) {
+                    for (i in 0 until partsOut.length()) {
+                        out.append(partsOut.optJSONObject(i)?.optString("text", "") ?: "")
+                    }
+                }
+                val text = out.toString().trim()
+                if (text.isNotEmpty()) return Attempt(true, text, false, false)
+                return Attempt(false, "The AI did not return any text. The content may have been blocked.", true, false)
+            }
+            val apiMsg = try {
+                JSONObject(resp).getJSONObject("error").getString("message")
+            } catch (e: Exception) {
+                ""
+            }
+            return when (code) {
+                400 -> if (apiMsg.contains("API key", true)) {
+                    Attempt(false, "Your API key is not valid. Please check it in the app.", false, false)
+                } else {
+                    Attempt(false, "The request was rejected. " + apiMsg, true, false)
+                }
+                401, 403 -> Attempt(false, "Your API key was rejected. Please check it in the app.", false, false)
+                404 -> Attempt(false, "AI model " + model + " is not available.", true, false)
+                429 -> Attempt(false, "Quota exceeded or too many requests.", true, true)
+                500, 502, 503, 504 -> Attempt(false, "The AI service is busy.", true, true)
+                else -> Attempt(false, "AI service error " + code + ". " + apiMsg, true, false)
+            }
+        } catch (e: java.net.UnknownHostException) {
+            return Attempt(false, "No internet connection.", false, false)
+        } catch (e: java.net.SocketTimeoutException) {
+            return Attempt(false, "The AI request timed out.", true, true)
+        } catch (e: Exception) {
+            return Attempt(false, "Network error. Please try again.", true, false)
+        }
+    }
+
+    // Must be called from a background thread.
+    fun generate(context: Context, prompt: String): Result {
+        val prefs = context.getSharedPreferences("screen_reader_prefs", Context.MODE_PRIVATE)
+        val key = prefs.getString("gemini_api_key", null)?.trim()
+        if (key.isNullOrEmpty()) {
+            return Result(false, "No API key found. Open the screen reader app and choose Add API key first.")
+        }
+        val lastGood = prefs.getString("gemini_last_model", null)
+        val models = if (lastGood != null && known.contains(lastGood)) {
+            listOf(lastGood) + known.filter { it != lastGood }
+        } else {
+            known
+        }
+        var lastError = "Unknown error."
+        var sawBusy = false
+        for (round in 0 until 2) {
+            for (model in models) {
+                val a = tryModel(model, key, prompt)
+                if (a.ok) {
+                    prefs.edit().putString("gemini_last_model", model).apply()
+                    return Result(true, a.text)
+                }
+                lastError = a.text
+                if (a.busy) sawBusy = true
+                if (!a.next) return Result(false, a.text)
+            }
+            if (round == 0 && sawBusy) {
+                try {
+                    Thread.sleep(2500)
+                } catch (e: InterruptedException) {
+                    break
+                }
+            } else {
+                break
+            }
+        }
+        if (sawBusy) return Result(false, "All AI models are busy or over quota right now. Please try again in a minute.")
+        return Result(false, lastError)
+    }
+}
+@@@FILE app/src/main/java/com/mohit/screenreader/GestureConfig.kt lines=101
 package com.mohit.screenreader
 
 import android.content.SharedPreferences
@@ -614,6 +755,8 @@ object GestureConfig {
         "describe_screen" to "AI: Describe screen",
         "describe_image" to "AI: Describe image",
         "voice_typing" to "AI: Voice typing",
+        "translate" to "Translate (popup)",
+        "voice_assistant" to "Voice assistant (offline commands)",
         "scroll_forward" to "Scroll list forward",
         "scroll_backward" to "Scroll list backward",
         "repeat" to "Repeat last spoken text",
@@ -822,7 +965,7 @@ class MicPermissionActivity : Activity() {
         finish()
     }
 }
-@@@FILE app/src/main/java/com/mohit/screenreader/MyScreenReaderService.kt lines=2724
+@@@FILE app/src/main/java/com/mohit/screenreader/MyScreenReaderService.kt lines=2991
 package com.mohit.screenreader
 
 import android.accessibilityservice.AccessibilityService
@@ -847,6 +990,9 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.speech.RecognitionListener
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.util.Base64
@@ -952,6 +1098,8 @@ class MyScreenReaderService : AccessibilityService() {
     // ---- Extensions menu ----
     private var extIds: List<String> = emptyList()
     private var extIndex = 0
+    private var recognizer: SpeechRecognizer? = null
+    private var assistantActive = false
 
     // ---- AI voice typing ----
     private val voiceLanguages = listOf(
@@ -1153,6 +1301,7 @@ class MyScreenReaderService : AccessibilityService() {
             AccessibilityEvent.TYPE_TOUCH_INTERACTION_START -> {
                 touching = true
                 if (voiceActive) stopVoiceTyping()
+                if (assistantActive) stopAssistant()
             }
             AccessibilityEvent.TYPE_TOUCH_INTERACTION_END -> {
                 touching = false
@@ -1423,6 +1572,10 @@ class MyScreenReaderService : AccessibilityService() {
             stopVoiceTyping()
             return true
         }
+        if (assistantActive) {
+            stopAssistant()
+            return true
+        }
         if (gestureId == AccessibilityService.GESTURE_DOUBLE_TAP) {
             if (mode == Mode.NORMAL) activateCurrent() else activateModal()
             return true
@@ -1498,6 +1651,8 @@ class MyScreenReaderService : AccessibilityService() {
             "paste" -> quickOp { opPaste(it) }
             "clear_edit" -> quickOp { opClear(it) }
             "voice_typing" -> beginVoiceFlow()
+            "translate" -> openTranslate()
+            "voice_assistant" -> startAssistant()
             "describe_screen" -> runAi(false)
             "describe_image" -> {
                 menuTarget = focusedNode ?: nodeList.getOrNull(currentIndex)
@@ -2045,6 +2200,8 @@ class MyScreenReaderService : AccessibilityService() {
                 "clear" -> doClear()
                 "ai" -> openAiMenu()
                 "extensions" -> openExtMenu()
+                "translate" -> openTranslate()
+                "assistant" -> startAssistant()
                 else -> closeMenu()
             }
             Mode.EXT_MENU -> activateExt()
@@ -2421,6 +2578,254 @@ class MyScreenReaderService : AccessibilityService() {
             return
         }
         handler.postDelayed({ macroStep(steps, idx, last, since) }, 300)
+    }
+
+    // ======================= Translate popup =======================
+
+    private fun openTranslate() {
+        mode = Mode.NORMAL
+        menuTarget = null
+        playSound(soundScreenChange)
+        try {
+            startActivity(Intent(this, TranslateActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        } catch (e: Exception) {
+            fail("Could not open the translate window.")
+        }
+    }
+
+    // ======================= Voice assistant (on-device speech recognition) =======================
+
+    // What you can say, mapped to the same functions a gesture can run.
+    private val voiceCommands: Map<String, String> = mapOf(
+        "next" to "next", "next item" to "next",
+        "previous" to "previous", "previous item" to "previous",
+        "activate" to "activate", "click" to "activate", "double tap" to "activate",
+        "read next" to "read_next", "next part" to "read_next",
+        "read previous" to "read_prev", "previous part" to "read_prev",
+        "next reading control" to "control_next", "next control" to "control_next",
+        "previous reading control" to "control_prev", "previous control" to "control_prev",
+        "menu" to "menu", "open menu" to "menu", "screen reader menu" to "menu",
+        "back" to "back", "go back" to "back", "press back" to "back",
+        "home" to "home", "go home" to "home", "home screen" to "home",
+        "recents" to "recents", "recent apps" to "recents", "overview" to "recents", "show recent apps" to "recents",
+        "notifications" to "notifications", "open notifications" to "notifications", "show notifications" to "notifications",
+        "quick settings" to "quick_settings", "open quick settings" to "quick_settings",
+        "power menu" to "power_dialog", "power dialog" to "power_dialog",
+        "lock screen" to "lock_screen", "lock phone" to "lock_screen",
+        "screenshot" to "screenshot", "take screenshot" to "screenshot", "take a screenshot" to "screenshot",
+        "copy" to "copy", "copy this" to "copy",
+        "append" to "append",
+        "cut" to "cut",
+        "paste" to "paste",
+        "clear text" to "clear_edit", "clear edit box" to "clear_edit", "clear field" to "clear_edit",
+        "describe screen" to "describe_screen", "describe the screen" to "describe_screen",
+        "describe image" to "describe_image", "describe this image" to "describe_image",
+        "voice typing" to "voice_typing", "start typing" to "voice_typing", "dictate" to "voice_typing",
+        "translate" to "translate", "open translate" to "translate",
+        "scroll down" to "scroll_forward", "scroll forward" to "scroll_forward", "scroll" to "scroll_forward",
+        "scroll up" to "scroll_backward", "scroll back" to "scroll_backward",
+        "repeat" to "repeat", "say again" to "repeat", "repeat that" to "repeat",
+        "stop" to "stop_speech", "stop speaking" to "stop_speech", "be quiet" to "stop_speech", "quiet" to "stop_speech",
+        "volume up" to "volume_up", "speech volume up" to "volume_up",
+        "volume down" to "volume_down", "speech volume down" to "volume_down"
+    )
+
+    private fun cleanPhrase(raw: String): String {
+        var t = raw.lowercase().replace(Regex("[^\\p{L}\\p{N}]+"), " ").trim()
+        for (pre in listOf("please ", "ok ", "okay ", "hey ")) {
+            if (t.startsWith(pre)) t = t.substring(pre.length)
+        }
+        if (t.endsWith(" please")) t = t.substring(0, t.length - 7)
+        return t.trim()
+    }
+
+    private fun squash(s: String): String = s.lowercase().filter { it.isLetterOrDigit() }
+
+    private fun startAssistant() {
+        mode = Mode.NORMAL
+        menuTarget = null
+        if (assistantActive) {
+            stopAssistant()
+            return
+        }
+        if (voiceActive) {
+            fail("Voice typing is running. Touch the screen to stop it first.")
+            return
+        }
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            speak("Microphone permission is needed. A permission screen will open. Allow it, then start the voice assistant again.")
+            try {
+                startActivity(Intent(this, MicPermissionActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            } catch (e: Exception) {
+                fail("Could not open the permission screen.")
+            }
+            return
+        }
+        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+            fail("Speech recognition is not available on this phone.")
+            return
+        }
+        assistantActive = true
+        speak("Listening. Say a command.")
+        afterSpeech {
+            if (assistantActive) beginRecognition()
+        }
+    }
+
+    private fun stopAssistant() {
+        if (!assistantActive) return
+        playSound(soundActivate)
+        finishAssistant()
+    }
+
+    private fun finishAssistant() {
+        assistantActive = false
+        val r = recognizer
+        recognizer = null
+        if (r != null) {
+            handler.post {
+                try {
+                    r.cancel()
+                    r.destroy()
+                } catch (e: Exception) {
+                    // ignore
+                }
+            }
+        }
+    }
+
+    private fun beginRecognition() {
+        try {
+            val onDevice = Build.VERSION.SDK_INT >= 33 && SpeechRecognizer.isOnDeviceRecognitionAvailable(this)
+            val r = if (onDevice) SpeechRecognizer.createOnDeviceSpeechRecognizer(this) else SpeechRecognizer.createSpeechRecognizer(this)
+            recognizer = r
+            r.setRecognitionListener(object : RecognitionListener {
+                override fun onReadyForSpeech(params: Bundle?) {}
+                override fun onBeginningOfSpeech() {}
+                override fun onRmsChanged(rmsdB: Float) {}
+                override fun onBufferReceived(buffer: ByteArray?) {}
+                override fun onEndOfSpeech() {}
+                override fun onPartialResults(partialResults: Bundle?) {}
+                override fun onEvent(eventType: Int, params: Bundle?) {}
+
+                override fun onError(error: Int) {
+                    if (!assistantActive) return
+                    finishAssistant()
+                    playSound(soundAlert)
+                    speak(
+                        when (error) {
+                            SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "I did not hear a command."
+                            SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED, SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE,
+                            SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT, SpeechRecognizer.ERROR_SERVER ->
+                                "Offline English speech recognition is not ready. Download the English offline speech pack in Google speech settings, then try again."
+                            SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Microphone permission is missing."
+                            SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "The speech recognizer is busy. Try again."
+                            else -> "Speech recognition error " + error
+                        }
+                    )
+                }
+
+                override fun onResults(results: Bundle?) {
+                    if (!assistantActive) return
+                    val list = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION) ?: arrayListOf()
+                    finishAssistant()
+                    handleCommand(list)
+                }
+            })
+            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+            intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-IN")
+            intent.putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+            intent.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
+            playSound(soundFocus)
+            r.startListening(intent)
+        } catch (e: Exception) {
+            finishAssistant()
+            fail("Could not start speech recognition.")
+        }
+    }
+
+    // The item on screen whose name matches exactly (ignoring case and punctuation).
+    private fun findExactNode(name: String): AccessibilityNodeInfo? {
+        rebuildNodeList()
+        val want = squash(name)
+        if (want.isEmpty()) return null
+        for (n in nodeList) {
+            if (labelsOfNode(n).any { squash(it) == want }) return n
+        }
+        return null
+    }
+
+    private fun clickTarget(p: String): String? {
+        for (pre in listOf("click on ", "click ", "tap on ", "tap ", "press ", "select ")) {
+            if (p.startsWith(pre) && p.length > pre.length) return p.substring(pre.length).trim()
+        }
+        return null
+    }
+
+    private fun handleCommand(alternatives: List<String>) {
+        val phrases = alternatives.map { cleanPhrase(it) }.filter { it.isNotEmpty() }
+        if (phrases.isEmpty()) {
+            playSound(soundAlert)
+            speak("I did not catch that.")
+            return
+        }
+        // 1. The same functions a gesture can run.
+        for (p in phrases) {
+            val id = voiceCommands[p]
+            if (id != null) {
+                playSound(soundActivate)
+                runFunction(id)
+                return
+            }
+        }
+        // 2. The Skip ads extension: "skip ad", optionally with "on" or "off".
+        for (p0 in phrases) {
+            val p = p0.replace("skip adds", "skip ad").replace("skip ads", "skip ad").replace("skip add", "skip ad")
+            if (p.contains("skip ad")) {
+                val words = p.split(" ")
+                val prefs = prefsObj()
+                val now = prefs.getBoolean("ext_youtube_skip", false)
+                val want = if (words.contains("off")) false else if (words.contains("on")) true else !now
+                prefs.edit().putBoolean("ext_youtube_skip", want).apply()
+                playSound(soundActivate)
+                speak(extLabel("yt_skip"))
+                return
+            }
+        }
+        // 3. An auto click function, by the name it was saved with.
+        val macros = AutoClickStore.load(prefsObj())
+        for (p in phrases) {
+            for (m in macros) {
+                val n = cleanPhrase(m.name)
+                if (n.isEmpty()) continue
+                if (p == n || p == "run " + n || p == "start " + n || p == "execute " + n || p == "activate " + n || p == "do " + n) {
+                    runMacro(m)
+                    return
+                }
+            }
+        }
+        // 4. "click <exact name of an item on the screen>".
+        var firstTarget: String? = null
+        for (p in phrases) {
+            val t = clickTarget(p) ?: continue
+            if (firstTarget == null) firstTarget = t
+            val node = findExactNode(t)
+            if (node != null) {
+                if (clickNodeOrAncestor(node)) {
+                    playSound(soundActivate)
+                    speak("Clicked " + t)
+                } else {
+                    fail("Found " + t + " but it could not be clicked")
+                }
+                return
+            }
+        }
+        if (firstTarget != null) {
+            fail("I could not find " + firstTarget + " on the screen. Please say the exact name again.")
+            return
+        }
+        fail("Sorry, I did not understand " + phrases[0])
     }
 
     // ======================= AI voice typing =======================
@@ -3540,6 +3945,11 @@ class MyScreenReaderService : AccessibilityService() {
         }
         handler.removeCallbacksAndMessages(null)
         voiceStopRequested = true
+        try {
+            recognizer?.destroy()
+        } catch (e: Exception) {
+            // ignore
+        }
         voiceExecutor.shutdown()
         aiExecutor.shutdown()
         tts?.shutdown()
@@ -3619,6 +4029,122 @@ class SoundSchemeActivity : android.app.Activity() {
         tts?.shutdown()
         previewPlayer?.release()
         super.onDestroy()
+    }
+}
+@@@FILE app/src/main/java/com/mohit/screenreader/TranslateActivity.kt lines=115
+package com.mohit.screenreader
+
+import android.app.Activity
+import android.app.AlertDialog
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.os.Bundle
+import android.widget.Button
+import android.widget.EditText
+import android.widget.TextView
+
+// Popup: type or paste text, pick source and target language, translate with Gemini,
+// and the translation is copied to the clipboard automatically.
+class TranslateActivity : Activity() {
+
+    private lateinit var edit: EditText
+    private lateinit var result: TextView
+    private lateinit var btnSource: Button
+    private lateinit var btnTarget: Button
+    private var busy = false
+
+    private fun prefs() = getSharedPreferences("screen_reader_prefs", Context.MODE_PRIVATE)
+    private val autoDetect = "Auto detect"
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_translate)
+        edit = findViewById(R.id.edtTranslate)
+        result = findViewById(R.id.txtTranslation)
+        btnSource = findViewById(R.id.btnSourceLang)
+        btnTarget = findViewById(R.id.btnTargetLang)
+        refreshButtons()
+
+        btnSource.setOnClickListener {
+            val list = listOf(autoDetect) + GeminiClient.languages
+            chooseLanguage("Source language", list) { name ->
+                prefs().edit().putString("tr_source", name).apply()
+                refreshButtons()
+                tell("Source language: " + name)
+            }
+        }
+        btnTarget.setOnClickListener {
+            chooseLanguage("Target language", GeminiClient.languages) { name ->
+                prefs().edit().putString("tr_target", name).apply()
+                refreshButtons()
+                tell("Target language: " + name)
+            }
+        }
+        findViewById<Button>(R.id.btnDoTranslate).setOnClickListener { translate() }
+        findViewById<Button>(R.id.btnCopyTranslation).setOnClickListener {
+            val t = result.text.toString()
+            if (t.isEmpty()) {
+                tell("There is no translation yet.")
+            } else {
+                copy(t)
+                tell("Translation copied.")
+            }
+        }
+        findViewById<Button>(R.id.btnCloseTranslate).setOnClickListener { finish() }
+        edit.requestFocus()
+    }
+
+    private fun refreshButtons() {
+        btnSource.text = "Source language: " + (prefs().getString("tr_source", autoDetect) ?: autoDetect)
+        btnTarget.text = "Target language: " + (prefs().getString("tr_target", "English") ?: "English")
+    }
+
+    private fun chooseLanguage(title: String, names: List<String>, onPick: (String) -> Unit) {
+        AlertDialog.Builder(this)
+            .setTitle(title)
+            .setItems(names.toTypedArray()) { _, which -> onPick(names[which]) }
+            .show()
+    }
+
+    private fun copy(text: String) {
+        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        cm.setPrimaryClip(ClipData.newPlainText("translation", text))
+    }
+
+    private fun tell(message: String) {
+        result.postDelayed({ result.announceForAccessibility(message) }, 600)
+    }
+
+    private fun translate() {
+        if (busy) return
+        val text = edit.text.toString().trim()
+        if (text.isEmpty()) {
+            tell("The text box is empty. Type or paste something to translate.")
+            return
+        }
+        val source = prefs().getString("tr_source", autoDetect) ?: autoDetect
+        val target = prefs().getString("tr_target", "English") ?: "English"
+        val prompt = "Translate the following text " +
+            (if (source == autoDetect) "" else "from " + source + " ") + "into " + target + ". " +
+            "Output only the translation, with no quotes, notes or explanations. " +
+            "Keep the meaning, tone, names, numbers and line breaks.\n\nText:\n" + text
+        busy = true
+        result.announceForAccessibility("Translating, please wait.")
+        Thread {
+            val r = GeminiClient.generate(this, prompt)
+            runOnUiThread {
+                busy = false
+                if (r.ok) {
+                    result.text = r.text
+                    copy(r.text)
+                    val spoken = if (r.text.length > 300) r.text.substring(0, 300) else r.text
+                    tell("Translated to " + target + " and copied. " + spoken)
+                } else {
+                    tell(r.text)
+                }
+            }
+        }.start()
     }
 }
 @@@FILE app/src/main/java/com/mohit/screenreader/TtsEngineActivity.kt lines=84
@@ -4169,6 +4695,76 @@ class TtsSettingsActivity : android.app.Activity() {
         android:text="iPhone VoiceOver sound scheme (default, selected)" />
 
 </LinearLayout>
+@@@FILE app/src/main/res/layout/activity_translate.xml lines=69
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="16dp">
+
+        <EditText
+            android:id="@+id/edtTranslate"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:minLines="3"
+            android:gravity="top"
+            android:textSize="18sp"
+            android:inputType="textMultiLine|textCapSentences"
+            android:hint="Type or paste the text to translate"
+            android:layout_marginBottom="12dp" />
+
+        <Button
+            android:id="@+id/btnSourceLang"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textSize="18sp"
+            android:layout_marginBottom="8dp" />
+
+        <Button
+            android:id="@+id/btnTargetLang"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textSize="18sp"
+            android:layout_marginBottom="8dp" />
+
+        <Button
+            android:id="@+id/btnDoTranslate"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textSize="18sp"
+            android:layout_marginBottom="12dp"
+            android:text="Translate and copy" />
+
+        <TextView
+            android:id="@+id/txtTranslation"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textSize="18sp"
+            android:textIsSelectable="true"
+            android:layout_marginBottom="12dp" />
+
+        <Button
+            android:id="@+id/btnCopyTranslation"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textSize="18sp"
+            android:layout_marginBottom="8dp"
+            android:text="Copy translation again" />
+
+        <Button
+            android:id="@+id/btnCloseTranslate"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textSize="18sp"
+            android:text="Close" />
+
+    </LinearLayout>
+</ScrollView>
 @@@FILE app/src/main/res/layout/activity_tts_engine.xml lines=29
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
@@ -4365,4 +4961,4 @@ XehhiM8td5vR5qBCHY+YMfra10tTy/xgRNRrrRcNNHSbWQAecXeCqdb08bvLZTndI3VLCqEQ2ymD
 I40dle7liPR7vO1czU8olsKzCkWEl52/MBGYRU0qbsVSXODURYJtUaNw6LwLIiFB6wI/FWcJbZRM
 swaeaoenTYwaj+jMx9zsBQPwNy6K9DBNMDEwDQYJYIZIAWUDBAIBBQAEILjKwwGnepKQjMXxBdZP
 DhLirhayEya0aFKSsRRHBYXdBBQYPkjlQTH4cXmwB9zwwKolA13UHAICJxA=
-@@@END count=34
+@@@END count=37
