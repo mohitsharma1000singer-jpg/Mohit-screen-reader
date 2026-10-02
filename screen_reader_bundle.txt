@@ -1,4 +1,4 @@
-@@@BUNDLE version=16
+@@@BUNDLE version=17
 @@@FILE app/build.gradle lines=48
 apply plugin: 'com.android.application'
 apply plugin: 'kotlin-android'
@@ -881,9 +881,10 @@ class GestureSettingsActivity : Activity() {
         }
     }
 }
-@@@FILE app/src/main/java/com/mohit/screenreader/MainActivity.kt lines=58
+@@@FILE app/src/main/java/com/mohit/screenreader/MainActivity.kt lines=72
 package com.mohit.screenreader
 
+import android.content.Context
 import android.content.Intent
 import android.os.Bundle
 import android.provider.Settings
@@ -935,6 +936,19 @@ class MainActivity : android.app.Activity() {
             startActivity(Intent(this, GamingAppsActivity::class.java))
         }
 
+        val proxButton = findViewById<Button>(R.id.btnProximity)
+        val prefs = getSharedPreferences("screen_reader_prefs", Context.MODE_PRIVATE)
+        fun showProximity() {
+            val on = prefs.getBoolean("proximity_silence", true)
+            proxButton.text = "Proximity sensor silences speech: " + (if (on) "On" else "Off")
+        }
+        showProximity()
+        proxButton.setOnClickListener {
+            prefs.edit().putBoolean("proximity_silence", !prefs.getBoolean("proximity_silence", true)).apply()
+            showProximity()
+            proxButton.announceForAccessibility(proxButton.text.toString())
+        }
+
         findViewById<Button>(R.id.btnApiKey).setOnClickListener {
             startActivity(Intent(this, ApiKeyActivity::class.java))
         }
@@ -965,7 +979,7 @@ class MicPermissionActivity : Activity() {
         finish()
     }
 }
-@@@FILE app/src/main/java/com/mohit/screenreader/MyScreenReaderService.kt lines=2991
+@@@FILE app/src/main/java/com/mohit/screenreader/MyScreenReaderService.kt lines=3070
 package com.mohit.screenreader
 
 import android.accessibilityservice.AccessibilityService
@@ -977,6 +991,10 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.AudioFormat
 import android.media.AudioRecord
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.media.MediaRecorder
 import android.content.Context
 import android.content.pm.ApplicationInfo
@@ -1100,6 +1118,11 @@ class MyScreenReaderService : AccessibilityService() {
     private var extIndex = 0
     private var recognizer: SpeechRecognizer? = null
     private var assistantActive = false
+    private var proximityListener: SensorEventListener? = null
+    private var assistantHearing = false
+    private var assistantTouchOkAfter = Long.MAX_VALUE
+    @Volatile private var voiceLastSpeechAt = 0L
+    private var voiceTouchOkAfter = Long.MAX_VALUE
 
     // ---- AI voice typing ----
     private val voiceLanguages = listOf(
@@ -1153,6 +1176,7 @@ class MyScreenReaderService : AccessibilityService() {
 
     override fun onServiceConnected() {
         super.onServiceConnected()
+        startProximity()
 
         val prefs = getSharedPreferences("screen_reader_prefs", Context.MODE_PRIVATE)
         val enginePackage = prefs.getString("tts_engine_package", null)
@@ -1300,8 +1324,7 @@ class MyScreenReaderService : AccessibilityService() {
             }
             AccessibilityEvent.TYPE_TOUCH_INTERACTION_START -> {
                 touching = true
-                if (voiceActive) stopVoiceTyping()
-                if (assistantActive) stopAssistant()
+                if (voiceActive || assistantActive) stopByTouchIfAllowed()
             }
             AccessibilityEvent.TYPE_TOUCH_INTERACTION_END -> {
                 touching = false
@@ -1361,16 +1384,32 @@ class MyScreenReaderService : AccessibilityService() {
         nodeList.clear()
         val root = rootInActiveWindow
         if (root != null) collectNodes(root, nodeList, false)
-        // The on-screen keyboard is a separate window: include its keys after the app's items.
+        // The on-screen keyboard and floating system controls (for example the screen
+        // recorder's stop button) are separate windows: include them after the app's items.
         try {
-            for (w in windows) {
-                if (w.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD) {
-                    val r = w.root
-                    if (r != null) collectNodes(r, nodeList, false)
+            val activeId = root?.windowId ?: -1
+            val dm = resources.displayMetrics
+            val thinLimit = (100 * dm.density).toInt()
+            val bounds = Rect()
+            val extra = windows.filter { it.id != activeId }.sortedBy { w ->
+                if (w.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD) 0 else 1
+            }
+            for (w in extra) {
+                val t = w.type
+                if (t != AccessibilityWindowInfo.TYPE_INPUT_METHOD &&
+                    t != AccessibilityWindowInfo.TYPE_SYSTEM &&
+                    t != AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY) continue
+                val r = w.root ?: continue
+                if (r.packageName?.toString() == packageName) continue
+                if (t != AccessibilityWindowInfo.TYPE_INPUT_METHOD) {
+                    // Skip the full-width status bar and navigation bar strips.
+                    w.getBoundsInScreen(bounds)
+                    if (bounds.width() >= dm.widthPixels * 9 / 10 && bounds.height() < thinLimit) continue
                 }
+                collectNodes(r, nodeList, false)
             }
         } catch (e: Exception) {
-            // Keyboard keys are optional.
+            // Extra windows are optional.
         }
     }
 
@@ -1567,13 +1606,10 @@ class MyScreenReaderService : AccessibilityService() {
     }
 
     override fun onGesture(gestureId: Int): Boolean {
-        if (voiceActive) {
-            // Any gesture while dictating stops voice typing.
-            stopVoiceTyping()
-            return true
-        }
-        if (assistantActive) {
-            stopAssistant()
+        if (voiceActive || assistantActive) {
+            // A touch normally stops dictation / the assistant, but not while you are still
+            // speaking and not in the first moments after it starts listening.
+            stopByTouchIfAllowed()
             return true
         }
         if (gestureId == AccessibilityService.GESTURE_DOUBLE_TAP) {
@@ -2580,6 +2616,36 @@ class MyScreenReaderService : AccessibilityService() {
         handler.postDelayed({ macroStep(steps, idx, last, since) }, 300)
     }
 
+    // ======================= Proximity sensor =======================
+
+    // Covering the proximity sensor silences speech (can be switched off on the app's home screen).
+    private fun startProximity() {
+        try {
+            if (proximityListener != null) return
+            val sm = getSystemService(Context.SENSOR_SERVICE) as SensorManager
+            val sensor = sm.getDefaultSensor(Sensor.TYPE_PROXIMITY) ?: return
+            val listener = object : SensorEventListener {
+                override fun onSensorChanged(event: SensorEvent) {
+                    if (!prefsObj().getBoolean("proximity_silence", true)) return
+                    val near = event.values.isNotEmpty() && event.values[0] < minOf(sensor.maximumRange, 5f)
+                    if (near) {
+                        try {
+                            tts?.stop()
+                        } catch (e: Exception) {
+                            // ignore
+                        }
+                    }
+                }
+
+                override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+            }
+            proximityListener = listener
+            sm.registerListener(listener, sensor, SensorManager.SENSOR_DELAY_NORMAL)
+        } catch (e: Exception) {
+            // no sensor
+        }
+    }
+
     // ======================= Translate popup =======================
 
     private fun openTranslate() {
@@ -2666,9 +2732,22 @@ class MyScreenReaderService : AccessibilityService() {
             return
         }
         assistantActive = true
+        assistantHearing = false
+        assistantTouchOkAfter = Long.MAX_VALUE
         speak("Listening. Say a command.")
         afterSpeech {
             if (assistantActive) beginRecognition()
+        }
+    }
+
+    private fun stopByTouchIfAllowed() {
+        val now = System.currentTimeMillis()
+        if (voiceActive) {
+            val pausedLongEnough = now - voiceLastSpeechAt > 1500
+            if (now >= voiceTouchOkAfter && pausedLongEnough) stopVoiceTyping()
+        }
+        if (assistantActive) {
+            if (now >= assistantTouchOkAfter && !assistantHearing) stopAssistant()
         }
     }
 
@@ -2701,10 +2780,15 @@ class MyScreenReaderService : AccessibilityService() {
             recognizer = r
             r.setRecognitionListener(object : RecognitionListener {
                 override fun onReadyForSpeech(params: Bundle?) {}
-                override fun onBeginningOfSpeech() {}
+                override fun onBeginningOfSpeech() {
+                    assistantHearing = true
+                }
                 override fun onRmsChanged(rmsdB: Float) {}
                 override fun onBufferReceived(buffer: ByteArray?) {}
-                override fun onEndOfSpeech() {}
+                override fun onEndOfSpeech() {
+                    assistantHearing = false
+                    assistantTouchOkAfter = System.currentTimeMillis() + 1500
+                }
                 override fun onPartialResults(partialResults: Bundle?) {}
                 override fun onEvent(eventType: Int, params: Bundle?) {}
 
@@ -2738,6 +2822,7 @@ class MyScreenReaderService : AccessibilityService() {
             intent.putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
             intent.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
             playSound(soundFocus)
+            assistantTouchOkAfter = System.currentTimeMillis() + 4000
             r.startListening(intent)
         } catch (e: Exception) {
             finishAssistant()
@@ -2934,6 +3019,8 @@ class MyScreenReaderService : AccessibilityService() {
                 maybeFinishVoice()
             } else {
                 playSound(soundFocus)
+                voiceLastSpeechAt = System.currentTimeMillis()
+                voiceTouchOkAfter = System.currentTimeMillis() + 3000
                 Thread { captureLoop(lang) }.start()
             }
         }
@@ -3036,6 +3123,7 @@ class MyScreenReaderService : AccessibilityService() {
                 }
                 val isSpeech = calibrated >= 8 && rms > threshold
                 if (isSpeech) {
+                    voiceLastSpeechAt = System.currentTimeMillis()
                     if (!haveSpeech) {
                         haveSpeech = true
                         for (p in preRoll) seg.write(p)
@@ -3944,6 +4032,11 @@ class MyScreenReaderService : AccessibilityService() {
                 .unregisterOnSharedPreferenceChangeListener(it)
         }
         handler.removeCallbacksAndMessages(null)
+        try {
+            proximityListener?.let { (getSystemService(Context.SENSOR_SERVICE) as SensorManager).unregisterListener(it) }
+        } catch (e: Exception) {
+            // ignore
+        }
         voiceStopRequested = true
         try {
             recognizer?.destroy()
@@ -4577,7 +4670,7 @@ class TtsSettingsActivity : android.app.Activity() {
         android:layout_weight="1" />
 
 </LinearLayout>
-@@@FILE app/src/main/res/layout/activity_main.xml lines=94
+@@@FILE app/src/main/res/layout/activity_main.xml lines=101
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
@@ -4663,6 +4756,13 @@ class TtsSettingsActivity : android.app.Activity() {
         android:layout_marginBottom="16dp"
         android:textSize="20sp"
         android:text="@string/settings_button" />
+
+    <Button
+        android:id="@+id/btnProximity"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="16dp"
+        android:textSize="20sp" />
 
     <Button
         android:id="@+id/btnApiKey"
@@ -4880,7 +4980,7 @@ class TtsSettingsActivity : android.app.Activity() {
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:accessibilityEventTypes="typeAllMask"
     android:accessibilityFeedbackType="feedbackSpoken"
-    android:accessibilityFlags="flagRequestTouchExplorationMode|flagRetrieveInteractiveWindows|flagReportViewIds|flagServiceHandlesDoubleTap|flagRequestFilterKeyEvents"
+    android:accessibilityFlags="flagRequestTouchExplorationMode|flagRetrieveInteractiveWindows|flagReportViewIds|flagIncludeNotImportantViews|flagServiceHandlesDoubleTap|flagRequestFilterKeyEvents"
     android:canRequestTouchExplorationMode="true"
     android:canRequestFilterKeyEvents="true"
     android:canRetrieveWindowContent="true"
