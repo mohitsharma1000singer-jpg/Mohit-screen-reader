@@ -1,4 +1,4 @@
-@@@BUNDLE version=18
+@@@BUNDLE version=19
 @@@FILE app/build.gradle lines=48
 apply plugin: 'com.android.application'
 apply plugin: 'kotlin-android'
@@ -701,7 +701,7 @@ object GeminiClient {
         return Result(false, lastError)
     }
 }
-@@@FILE app/src/main/java/com/mohit/screenreader/GestureConfig.kt lines=141
+@@@FILE app/src/main/java/com/mohit/screenreader/GestureConfig.kt lines=143
 package com.mohit.screenreader
 
 import android.content.SharedPreferences
@@ -797,6 +797,7 @@ object GestureConfig {
         "voice_typing" to "AI: Voice typing",
         "translate" to "Translate (popup)",
         "voice_assistant" to "Voice assistant (offline commands)",
+        "hold_drag" to "Touch and hold, then drag (voice message record)",
         "scroll_forward" to "Scroll list forward",
         "scroll_backward" to "Scroll list backward",
         "repeat" to "Repeat last spoken text",
@@ -817,7 +818,8 @@ object GestureConfig {
         "up_left" to "home",
         "left_up" to "recents",
         "right_down" to "notifications",
-        "up_right" to "quick_settings"
+        "up_right" to "quick_settings",
+        "double_tap_hold" to "hold_drag"
     )
 
     fun functionFor(prefs: SharedPreferences, gestureKey: String): String {
@@ -1019,7 +1021,7 @@ class MicPermissionActivity : Activity() {
         finish()
     }
 }
-@@@FILE app/src/main/java/com/mohit/screenreader/MyScreenReaderService.kt lines=3165
+@@@FILE app/src/main/java/com/mohit/screenreader/MyScreenReaderService.kt lines=3385
 package com.mohit.screenreader
 
 import android.accessibilityservice.AccessibilityService
@@ -1027,6 +1029,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.Manifest
 import android.accessibilityservice.AccessibilityServiceInfo
+import android.accessibilityservice.GestureDescription
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.AudioFormat
@@ -1043,6 +1046,7 @@ import android.media.AudioAttributes
 import android.media.AudioManager
 import android.media.SoundPool
 import android.graphics.Bitmap
+import android.graphics.Path
 import android.graphics.Rect
 import android.os.Build
 import android.os.Bundle
@@ -1395,8 +1399,8 @@ class MyScreenReaderService : AccessibilityService() {
         if (!node.isClickable && !isSlider(node)) {
             var p = node.parent
             var d = 0
-            while (p != null && d < 4) {
-                if (p.isClickable && labelOf(p) != null) {
+            while (p != null && d < 10) {
+                if ((d < 4 && p.isClickable && labelOf(p) != null) || tbGroupText(p) != null) {
                     node = p
                     break
                 }
@@ -1451,13 +1455,20 @@ class MyScreenReaderService : AccessibilityService() {
         } catch (e: Exception) {
             // Extra windows are optional.
         }
+        dedupeNeighbors(nodeList)
     }
 
     // ---- Labels: one item per row, never an empty "item" followed by its own text ----
 
+    private fun tipOf(node: AccessibilityNodeInfo): String? {
+        if (Build.VERSION.SDK_INT < 28) return null
+        return node.tooltipText?.toString()?.takeIf { it.isNotBlank() }
+    }
+
     private fun ownLabel(node: AccessibilityNodeInfo): String? {
         return node.text?.toString()?.takeIf { it.isNotBlank() }
             ?: node.contentDescription?.toString()?.takeIf { it.isNotBlank() }
+            ?: tipOf(node)
     }
 
     // Text of the non-clickable descendants of a clickable row, joined together.
@@ -1483,6 +1494,7 @@ class MyScreenReaderService : AccessibilityService() {
     // Full spoken label: its own text plus the text of plain children (e.g. a quick-settings tile
     // whose name and "On/Off" are separate views) plus its state (On/Off, checked).
     private fun labelOf(node: AccessibilityNodeInfo): String? {
+        tbGroupText(node)?.let { return it }
         val parts = mutableListOf<String>()
         val own = ownLabel(node)
         if (own != null) parts.add(own)
@@ -1531,7 +1543,7 @@ class MyScreenReaderService : AccessibilityService() {
 
     private fun tbHasText(n: AccessibilityNodeInfo): Boolean {
         if (n.collectionInfo != null) return false
-        return !n.text.isNullOrEmpty() || !n.contentDescription.isNullOrEmpty() || !n.hintText.isNullOrEmpty()
+        return !n.text.isNullOrEmpty() || !n.contentDescription.isNullOrEmpty() || !n.hintText.isNullOrEmpty() || tipOf(n) != null
     }
 
     private fun tbHasState(n: AccessibilityNodeInfo): Boolean {
@@ -1621,15 +1633,104 @@ class MyScreenReaderService : AccessibilityService() {
             return true
         }
         if (n.childCount == 0) return true
-        return tbSpeaking(n)
+        if (tbSpeaking(n)) return true
+        // A button with nothing to say but no other controls inside: still a real control.
+        return !tbHasActionableDescendant(n) && !coversWholeScreen(n)
     }
 
-    private fun collectNodes(node: AccessibilityNodeInfo?, out: MutableList<AccessibilityNodeInfo>, insideMerged: Boolean) {
+    // ---- One message row = one item (WhatsApp: "You, Voice message, 20 seconds, 8:30 PM, Delivered") ----
+
+    private fun groupActionable(n: AccessibilityNodeInfo): Boolean {
+        return tbFocusableOrClickable(n) || isSlider(n) || n.rangeInfo != null
+    }
+
+    private fun groupParts(n: AccessibilityNodeInfo, out: MutableList<String>, depth: Int) {
+        if (depth > 10 || out.size > 12) return
+        for (i in 0 until n.childCount) {
+            val c = n.getChild(i) ?: continue
+            if (!c.isVisibleToUser) continue
+            if (groupActionable(c)) continue // a real control stays its own item
+            if (tbIsScrollItem(c)) continue
+            val own = ownLabel(c)
+            if (own != null) out.add(own) else groupParts(c, out, depth + 1)
+        }
+    }
+
+    // A plain (not clickable) row directly inside a list that holds several pieces of text:
+    // they are read together as one item. Buttons and sliders inside it stay separate.
+    private fun tbGroupText(n: AccessibilityNodeInfo): String? {
+        if (n.childCount < 2) return null
+        if (tbFocusableOrClickable(n) || tbIsScrollItem(n) || isSlider(n)) return null
+        val p = n.parent ?: return null
+        if (!tbIsScrollItem(p)) return null
+        val parts = mutableListOf<String>()
+        groupParts(n, parts, 0)
+        if (parts.size < 2) return null
+        return parts.joinToString(", ")
+    }
+
+    private fun tbHasActionableDescendant(n: AccessibilityNodeInfo, depth: Int = 0): Boolean {
+        if (depth > 8) return false
+        for (i in 0 until n.childCount) {
+            val c = n.getChild(i) ?: continue
+            if (!c.isVisibleToUser) continue
+            if (tbFocusableOrClickable(c)) return true
+            if (tbHasActionableDescendant(c, depth + 1)) return true
+        }
+        return false
+    }
+
+    private fun coversWholeScreen(n: AccessibilityNodeInfo): Boolean {
+        val dm = resources.displayMetrics
+        val b = boundsOf(n)
+        return b.width() >= dm.widthPixels * 9 / 10 && b.height() >= dm.heightPixels * 8 / 10
+    }
+
+    private fun collectNodes(node: AccessibilityNodeInfo?, out: MutableList<AccessibilityNodeInfo>, inGroup: Boolean) {
         if (node == null) return
         if (!node.isVisibleToUser) return
-        if (isSlider(node) || tbShouldFocus(node)) out.add(node)
+        var groupHere = inGroup
+        if (!inGroup && tbGroupText(node) != null) {
+            out.add(node)
+            groupHere = true
+        } else if (inGroup) {
+            // Inside a merged row only real controls are separate items.
+            if (groupActionable(node) && (isSlider(node) || tbShouldFocus(node))) out.add(node)
+        } else if (isSlider(node) || tbShouldFocus(node)) {
+            out.add(node)
+        }
         for (i in 0 until node.childCount) {
-            collectNodes(node.getChild(i), out, insideMerged)
+            collectNodes(node.getChild(i), out, groupHere)
+        }
+    }
+
+    // If a name is already inside the item right next to it (a folder and its own name),
+    // keep only the one that says it all.
+    private fun dedupeNeighbors(list: MutableList<AccessibilityNodeInfo>) {
+        val gap = (16 * resources.displayMetrics.density).toInt()
+        var i = 0
+        while (i < list.size - 1) {
+            val a = list[i]
+            val b = list[i + 1]
+            val la = labelOf(a)
+            val lb = labelOf(b)
+            if (la != null && lb != null && !isSlider(a) && !isSlider(b)) {
+                val ra = Rect(boundsOf(a)).apply { inset(-gap, -gap) }
+                val rb = Rect(boundsOf(b)).apply { inset(-gap, -gap) }
+                if (Rect.intersects(ra, rb)) {
+                    val na = normLabel(la)
+                    val nb = normLabel(lb)
+                    if (!tbFocusableOrClickable(b) && na.contains(nb)) {
+                        list.removeAt(i + 1)
+                        continue
+                    }
+                    if (!tbFocusableOrClickable(a) && nb.contains(na)) {
+                        list.removeAt(i)
+                        continue
+                    }
+                }
+            }
+            i++
         }
     }
 
@@ -1734,6 +1835,11 @@ class MyScreenReaderService : AccessibilityService() {
             stopByTouchIfAllowed()
             return true
         }
+        if (holdActive) {
+            // While a press-and-hold is going on, swipes move the held touch.
+            holdSwipe(gestureId)
+            return true
+        }
         if (gestureId == AccessibilityService.GESTURE_DOUBLE_TAP) {
             if (mode == Mode.NORMAL) activateCurrent() else activateModal()
             return true
@@ -1752,6 +1858,99 @@ class MyScreenReaderService : AccessibilityService() {
         val prefs = getSharedPreferences("screen_reader_prefs", Context.MODE_PRIVATE)
         runFunction(GestureConfig.functionFor(prefs, key))
         return true
+    }
+
+    // ---- Double tap and hold: really press and hold the focused item (WhatsApp voice message) ----
+    // The finger stays on the glass; we keep a matching held touch on the app until you lift.
+    // Swipes while holding move that held touch (slide left to cancel, up to lock, etc.).
+
+    private var holdActive = false
+    private var holdStroke: GestureDescription.StrokeDescription? = null
+    private var holdX = 0f
+    private var holdY = 0f
+    private var holdStartedAt = 0L
+    private var pendingMove: Pair<Float, Float>? = null
+
+    private fun startHold() {
+        if (Build.VERSION.SDK_INT < 26) {
+            fail("Needs Android 8 or newer")
+            return
+        }
+        val node = focusedNode ?: nodeList.getOrNull(currentIndex)
+        if (node == null) {
+            fail("Focus an item first")
+            return
+        }
+        val r = boundsOf(node)
+        holdX = r.exactCenterX()
+        holdY = r.exactCenterY()
+        pendingMove = null
+        holdStartedAt = System.currentTimeMillis()
+        val path = Path()
+        path.moveTo(holdX, holdY)
+        val stroke = GestureDescription.StrokeDescription(path, 0L, 250L, true)
+        holdStroke = stroke
+        holdActive = true
+        sendHoldStroke(stroke)
+        playSound(soundActivate)
+    }
+
+    private fun sendHoldStroke(stroke: GestureDescription.StrokeDescription) {
+        val g = GestureDescription.Builder().addStroke(stroke).build()
+        val ok = dispatchGesture(g, object : AccessibilityService.GestureResultCallback() {
+            override fun onCompleted(gestureDescription: GestureDescription?) {
+                if (holdActive) handler.post { nextHoldSegment() }
+            }
+
+            override fun onCancelled(gestureDescription: GestureDescription?) {
+                holdActive = false
+                holdStroke = null
+            }
+        }, null)
+        if (!ok) {
+            holdActive = false
+            holdStroke = null
+            fail("Could not hold. Turn the screen reader off and on once in accessibility settings")
+        }
+    }
+
+    private fun nextHoldSegment() {
+        val prev = holdStroke ?: return
+        if (!holdActive || Build.VERSION.SDK_INT < 26) return
+        val mv = pendingMove
+        pendingMove = null
+        val path = Path()
+        path.moveTo(holdX, holdY)
+        var duration = 250L
+        if (mv != null) {
+            path.lineTo(mv.first, mv.second)
+            holdX = mv.first
+            holdY = mv.second
+            duration = 300L
+        }
+        val timedOut = System.currentTimeMillis() - holdStartedAt > 55000L
+        val last = (!touching || timedOut) && mv == null
+        val next = prev.continueStroke(path, 0L, duration, !last)
+        holdStroke = if (last) null else next
+        if (last) holdActive = false
+        sendHoldStroke(next)
+    }
+
+    private fun holdSwipe(gestureId: Int) {
+        val dm = resources.displayMetrics
+        val d = 130f * dm.density
+        var x = holdX
+        var y = holdY
+        when (gestureId) {
+            AccessibilityService.GESTURE_SWIPE_UP -> y -= d
+            AccessibilityService.GESTURE_SWIPE_DOWN -> y += d
+            AccessibilityService.GESTURE_SWIPE_LEFT -> x -= d
+            AccessibilityService.GESTURE_SWIPE_RIGHT -> x += d
+            else -> return
+        }
+        x = x.coerceIn(1f, (dm.widthPixels - 1).toFloat())
+        y = y.coerceIn(1f, (dm.heightPixels - 1).toFloat())
+        pendingMove = Pair(x, y)
     }
 
     private fun globalAction(action: Int) {
@@ -1816,6 +2015,7 @@ class MyScreenReaderService : AccessibilityService() {
                 menuTarget = focusedNode ?: nodeList.getOrNull(currentIndex)
                 runAi(true)
             }
+            "hold_drag" -> holdAndDrag()
             "scroll_forward" -> scrollFromGesture(1)
             "scroll_backward" -> scrollFromGesture(-1)
             "repeat" -> if (lastSpoken.isNotEmpty()) speak(lastSpoken) else playSound(soundAlert)
@@ -1843,6 +2043,27 @@ class MyScreenReaderService : AccessibilityService() {
                 fail("Extension not found")
             }
         }
+    }
+
+    // Touch and hold on the focused item, and keep following the finger when it moves
+    // (WhatsApp voice message: hold, then swipe up to lock or left to cancel).
+    private fun holdAndDrag() {
+        if (Build.VERSION.SDK_INT >= 34) {
+            try {
+                getTouchInteractionController(Display.DEFAULT_DISPLAY).performLongClickAndStartDrag()
+                return
+            } catch (t: Throwable) {
+                // not available in this state: use the held touch below
+            }
+        }
+        // Older Android: keep a held touch on the item for as long as the finger stays down.
+        if (Build.VERSION.SDK_INT >= 26 && touching && (focusedNode ?: nodeList.getOrNull(currentIndex)) != null) {
+            startHold()
+            return
+        }
+        val n = focusedNode ?: nodeList.getOrNull(currentIndex)
+        if (n != null && n.performAction(AccessibilityNodeInfo.ACTION_LONG_CLICK)) playSound(soundActivate)
+        else fail("Could not touch and hold")
     }
 
     private fun moveNext() = moveBy(1)
@@ -1967,6 +2188,7 @@ class MyScreenReaderService : AccessibilityService() {
             cls.contains("ImageView") || cls.contains("Image") -> if (node.isClickable) "Unlabeled button" else "Unlabeled image"
             cls.contains("EditText") -> "Edit box"
             cls.contains("Switch") || cls.contains("Check") -> "Unlabeled switch"
+            node.isClickable -> "Unlabeled button"
             else -> "Unlabeled"
         }
     }
@@ -5110,7 +5332,7 @@ class TtsSettingsActivity : android.app.Activity() {
     <string name="customize_reading_button">Customize reading controls</string>
     <string name="extensions_button">Extensions</string>
 </resources>
-@@@FILE app/src/main/res/xml/accessibility_service_config.xml lines=11
+@@@FILE app/src/main/res/xml/accessibility_service_config.xml lines=12
 <?xml version="1.0" encoding="utf-8"?>
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:accessibilityEventTypes="typeAllMask"
@@ -5120,6 +5342,7 @@ class TtsSettingsActivity : android.app.Activity() {
     android:canRequestFilterKeyEvents="true"
     android:canRetrieveWindowContent="true"
     android:canTakeScreenshot="true"
+    android:canPerformGestures="true"
     android:description="@string/accessibility_service_description"
     android:notificationTimeout="80" />
 @@@FILE build.gradle lines=17
