@@ -1,4 +1,4 @@
-@@@BUNDLE version=17
+@@@BUNDLE version=18
 @@@FILE app/build.gradle lines=48
 apply plugin: 'com.android.application'
 apply plugin: 'kotlin-android'
@@ -701,7 +701,7 @@ object GeminiClient {
         return Result(false, lastError)
     }
 }
-@@@FILE app/src/main/java/com/mohit/screenreader/GestureConfig.kt lines=101
+@@@FILE app/src/main/java/com/mohit/screenreader/GestureConfig.kt lines=141
 package com.mohit.screenreader
 
 import android.content.SharedPreferences
@@ -726,7 +726,47 @@ object GestureConfig {
         "left_down" to "Swipe left then down",
         "right_up" to "Swipe right then up",
         "right_down" to "Swipe right then down",
-        "double_tap_hold" to "Double tap and hold"
+        "double_tap_hold" to "Double tap and hold",
+        "f2_tap1" to "Two finger single tap",
+        "f2_tap2" to "Two finger double tap",
+        "f2_tap3" to "Two finger triple tap",
+        "f2_tap1_hold" to "Two finger single tap and hold",
+        "f2_tap2_hold" to "Two finger double tap and hold",
+        "f2_tap3_hold" to "Two finger triple tap and hold",
+        "f2_up" to "Two finger swipe up",
+        "f2_down" to "Two finger swipe down",
+        "f2_left" to "Two finger swipe left",
+        "f2_right" to "Two finger swipe right",
+        "f3_tap1" to "Three finger single tap",
+        "f3_tap2" to "Three finger double tap",
+        "f3_tap3" to "Three finger triple tap",
+        "f3_tap1_hold" to "Three finger single tap and hold",
+        "f3_tap2_hold" to "Three finger double tap and hold",
+        "f3_tap3_hold" to "Three finger triple tap and hold",
+        "f3_up" to "Three finger swipe up",
+        "f3_down" to "Three finger swipe down",
+        "f3_left" to "Three finger swipe left",
+        "f3_right" to "Three finger swipe right",
+        "f4_tap1" to "Four finger single tap",
+        "f4_tap2" to "Four finger double tap",
+        "f4_tap3" to "Four finger triple tap",
+        "f4_tap2_hold" to "Four finger double tap and hold",
+        "f4_up" to "Four finger swipe up",
+        "f4_down" to "Four finger swipe down",
+        "f4_left" to "Four finger swipe left",
+        "f4_right" to "Four finger swipe right"
+    )
+
+    // Android's numeric ids for the multi finger gestures (same numbers TalkBack uses).
+    val multiFingerIds: Map<Int, String> = mapOf(
+        19 to "f2_tap1", 20 to "f2_tap2", 21 to "f2_tap3",
+        63 to "f2_tap1_hold", 40 to "f2_tap2_hold", 43 to "f2_tap3_hold",
+        25 to "f2_up", 26 to "f2_down", 27 to "f2_left", 28 to "f2_right",
+        22 to "f3_tap1", 23 to "f3_tap2", 24 to "f3_tap3",
+        44 to "f3_tap1_hold", 41 to "f3_tap2_hold", 45 to "f3_tap3_hold",
+        29 to "f3_up", 30 to "f3_down", 31 to "f3_left", 32 to "f3_right",
+        37 to "f4_tap1", 38 to "f4_tap2", 39 to "f4_tap3", 42 to "f4_tap2_hold",
+        33 to "f4_up", 34 to "f4_down", 35 to "f4_left", 36 to "f4_right"
     )
 
     val functions: List<Pair<String, String>> = listOf(
@@ -979,7 +1019,7 @@ class MicPermissionActivity : Activity() {
         finish()
     }
 }
-@@@FILE app/src/main/java/com/mohit/screenreader/MyScreenReaderService.kt lines=3070
+@@@FILE app/src/main/java/com/mohit/screenreader/MyScreenReaderService.kt lines=3165
 package com.mohit.screenreader
 
 import android.accessibilityservice.AccessibilityService
@@ -1365,7 +1405,7 @@ class MyScreenReaderService : AccessibilityService() {
             }
         }
         if (!node.isVisibleToUser) return
-        if (labelOf(node) == null && !isSlider(node)) return
+        if (!isSlider(node) && labelOf(node) == null && !tbShouldFocus(node)) return
 
         focusedNode = node
         resetFocusState()
@@ -1457,7 +1497,7 @@ class MyScreenReaderService : AccessibilityService() {
                 // optional
             }
         }
-        if (node.isClickable && !node.isScrollable && (own == null || own.length <= 40)) {
+        if ((node.isClickable || tbActionable(node)) && !node.isScrollable && (own == null || own.length <= 40)) {
             val g = mutableListOf<String>()
             gatherText(node, g, 0)
             if (g.size <= 8) {
@@ -1484,30 +1524,112 @@ class MyScreenReaderService : AccessibilityService() {
         return parts.joinToString(", ")
     }
 
-    private fun hasLabeledDescendant(node: AccessibilityNodeInfo, depth: Int = 0): Boolean {
-        if (depth > 6) return false
-        for (i in 0 until node.childCount) {
-            val c = node.getChild(i) ?: continue
-            if (!c.isVisibleToUser) continue
-            if (ownLabel(c) != null) return true
-            if (hasLabeledDescendant(c, depth + 1)) return true
+    // ---- Which items get focus: the same rules Google TalkBack uses ----
+    // An item gets focus only if it is visible and (a) it can be clicked / focused and has
+    // something to say, or (b) it has text and no ancestor already takes the focus.
+    // Containers with nothing to say never get focus, so there is no empty "item" any more.
+
+    private fun tbHasText(n: AccessibilityNodeInfo): Boolean {
+        if (n.collectionInfo != null) return false
+        return !n.text.isNullOrEmpty() || !n.contentDescription.isNullOrEmpty() || !n.hintText.isNullOrEmpty()
+    }
+
+    private fun tbHasState(n: AccessibilityNodeInfo): Boolean {
+        if (Build.VERSION.SDK_INT >= 30 && !n.stateDescription.isNullOrEmpty()) return true
+        if (n.isCheckable) return true
+        val r = n.rangeInfo
+        return r != null && r.max > r.min
+    }
+
+    private fun tbActionable(n: AccessibilityNodeInfo): Boolean {
+        if (n.isClickable || n.isLongClickable || n.isFocusable) return true
+        for (a in n.actionList) {
+            val id = a.id
+            if (id == AccessibilityNodeInfo.ACTION_FOCUS ||
+                id == AccessibilityNodeInfo.ACTION_CLICK ||
+                id == AccessibilityNodeInfo.ACTION_LONG_CLICK ||
+                id == AccessibilityNodeInfo.ACTION_NEXT_AT_MOVEMENT_GRANULARITY ||
+                id == AccessibilityNodeInfo.ACTION_PREVIOUS_AT_MOVEMENT_GRANULARITY) return true
         }
         return false
+    }
+
+    private fun tbFocusableOrClickable(n: AccessibilityNodeInfo): Boolean {
+        if (!n.isVisibleToUser) return false
+        val srf = Build.VERSION.SDK_INT >= 28 && n.isScreenReaderFocusable
+        return srf || tbActionable(n)
+    }
+
+    private fun tbIsScrollItem(n: AccessibilityNodeInfo?): Boolean {
+        if (n == null) return false
+        val cls = n.className?.toString() ?: ""
+        if (cls.contains("ViewPager")) return false
+        return n.isScrollable || n.collectionInfo != null || cls.contains("ListView") ||
+            cls.contains("GridView") || cls.contains("RecyclerView")
+    }
+
+    private fun tbTopLevelScrollItem(n: AccessibilityNodeInfo): Boolean {
+        return n.isVisibleToUser && tbIsScrollItem(n.parent)
+    }
+
+    // Does this node (or a plain, non-clickable descendant) have something to speak?
+    private fun tbSpeaking(n: AccessibilityNodeInfo, depth: Int = 0): Boolean {
+        if (depth > 12) return false
+        if (tbHasText(n) || tbHasState(n)) return true
+        for (i in 0 until n.childCount) {
+            val c = n.getChild(i) ?: continue
+            if (!c.isVisibleToUser) continue
+            if (tbFocusableOrClickable(c)) continue // a separate item with its own focus
+            if (tbTopLevelScrollItem(c) && tbSpeaking(c, depth + 1) && !n.isClickable && !n.isLongClickable) continue
+            if (tbSpeaking(c, depth + 1)) return true
+        }
+        // Invisible children with text that cannot be acted on still count (TalkBack does the same).
+        for (i in 0 until n.childCount) {
+            val c = n.getChild(i) ?: continue
+            if (!c.isVisibleToUser && tbHasText(c) && !tbActionable(c)) return true
+        }
+        return false
+    }
+
+    private fun tbShouldFocusNoChildren(n: AccessibilityNodeInfo): Boolean {
+        return tbFocusableOrClickable(n) || (tbTopLevelScrollItem(n) && tbSpeaking(n))
+    }
+
+    private fun tbShouldFocus(n: AccessibilityNodeInfo): Boolean {
+        if (!n.isVisibleToUser) return false
+        // A big container that fills its whole window and does nothing itself is skipped.
+        try {
+            val w = n.window
+            if (w != null && n.childCount > 0 && !tbFocusableOrClickable(n)) {
+                val wb = Rect()
+                w.getBoundsInScreen(wb)
+                if (wb == boundsOf(n)) return false
+            }
+        } catch (e: Exception) {
+            // optional
+        }
+        val focusable = tbShouldFocusNoChildren(n)
+        if (!focusable) {
+            if (!(tbHasText(n) || tbHasState(n))) return false
+            var p: AccessibilityNodeInfo? = n.parent
+            var d = 0
+            while (p != null && d < 30) {
+                if (tbShouldFocusNoChildren(p)) return false
+                p = p.parent
+                d++
+            }
+            return true
+        }
+        if (n.childCount == 0) return true
+        return tbSpeaking(n)
     }
 
     private fun collectNodes(node: AccessibilityNodeInfo?, out: MutableList<AccessibilityNodeInfo>, insideMerged: Boolean) {
         if (node == null) return
         if (!node.isVisibleToUser) return
-        val label = labelOf(node)
-        val clickableOk = node.isClickable && (label != null || !hasLabeledDescendant(node))
-        val slider = isSlider(node)
-        val eligible = clickableOk || slider || (!insideMerged && label != null)
-        if (eligible) out.add(node)
-        // Once a labelled clickable row has been added, its plain text children are
-        // already part of its label: only real controls inside it stay separate items.
-        val merged = insideMerged || (node.isClickable && label != null && eligible)
+        if (isSlider(node) || tbShouldFocus(node)) out.add(node)
         for (i in 0 until node.childCount) {
-            collectNodes(node.getChild(i), out, merged)
+            collectNodes(node.getChild(i), out, insideMerged)
         }
     }
 
@@ -1602,7 +1724,7 @@ class MyScreenReaderService : AccessibilityService() {
         AccessibilityService.GESTURE_SWIPE_DOWN_AND_LEFT -> "down_left"
         AccessibilityService.GESTURE_SWIPE_DOWN_AND_RIGHT -> "down_right"
         AccessibilityService.GESTURE_DOUBLE_TAP_AND_HOLD -> "double_tap_hold"
-        else -> null
+        else -> GestureConfig.multiFingerIds[id]
     }
 
     override fun onGesture(gestureId: Int): Boolean {
@@ -1834,7 +1956,19 @@ class MyScreenReaderService : AccessibilityService() {
             val value = sliderValueOrNull(node) ?: "value unknown"
             return (label ?: "Slider") + ", slider, " + value + ", swipe up to increase, swipe down to decrease"
         }
-        return label ?: "Item"
+        return label ?: unlabeledName(node)
+    }
+
+    // For a control that has no text at all, say what kind of control it is.
+    private fun unlabeledName(node: AccessibilityNodeInfo): String {
+        val cls = node.className?.toString() ?: ""
+        return when {
+            cls.contains("Button") -> "Unlabeled button"
+            cls.contains("ImageView") || cls.contains("Image") -> if (node.isClickable) "Unlabeled button" else "Unlabeled image"
+            cls.contains("EditText") -> "Edit box"
+            cls.contains("Switch") || cls.contains("Check") -> "Unlabeled switch"
+            else -> "Unlabeled"
+        }
     }
 
     private fun announceCurrent() {
@@ -2415,7 +2549,8 @@ class MyScreenReaderService : AccessibilityService() {
         try {
             val info = serviceInfo ?: return
             val f = AccessibilityServiceInfo.FLAG_REQUEST_TOUCH_EXPLORATION_MODE or
-                AccessibilityServiceInfo.FLAG_SERVICE_HANDLES_DOUBLE_TAP
+                AccessibilityServiceInfo.FLAG_SERVICE_HANDLES_DOUBLE_TAP or
+                AccessibilityServiceInfo.FLAG_REQUEST_MULTI_FINGER_GESTURES
             info.flags = if (on) info.flags or f else info.flags and f.inv()
             serviceInfo = info
         } catch (e: Exception) {
@@ -4980,7 +5115,7 @@ class TtsSettingsActivity : android.app.Activity() {
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:accessibilityEventTypes="typeAllMask"
     android:accessibilityFeedbackType="feedbackSpoken"
-    android:accessibilityFlags="flagRequestTouchExplorationMode|flagRetrieveInteractiveWindows|flagReportViewIds|flagIncludeNotImportantViews|flagServiceHandlesDoubleTap|flagRequestFilterKeyEvents"
+    android:accessibilityFlags="flagRequestTouchExplorationMode|flagRetrieveInteractiveWindows|flagReportViewIds|flagIncludeNotImportantViews|flagServiceHandlesDoubleTap|flagRequestFilterKeyEvents|flagRequestMultiFingerGestures"
     android:canRequestTouchExplorationMode="true"
     android:canRequestFilterKeyEvents="true"
     android:canRetrieveWindowContent="true"
