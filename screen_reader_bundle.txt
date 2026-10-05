@@ -1,4 +1,4 @@
-@@@BUNDLE version=19
+@@@BUNDLE version=20
 @@@FILE app/build.gradle lines=48
 apply plugin: 'com.android.application'
 apply plugin: 'kotlin-android'
@@ -48,12 +48,14 @@ android {
 dependencies {
     implementation "org.jetbrains.kotlin:kotlin-stdlib:1.9.24"
 }
-@@@FILE app/src/main/AndroidManifest.xml lines=106
+@@@FILE app/src/main/AndroidManifest.xml lines=114
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
 
     <queries>
@@ -119,6 +121,12 @@ dependencies {
             android:label="Translate"
             android:windowSoftInputMode="stateVisible|adjustResize"
             android:theme="@android:style/Theme.DeviceDefault.Dialog" />
+
+        <activity
+            android:name=".CameraLiveActivity"
+            android:exported="false"
+            android:label="Camera AI"
+            android:configChanges="orientation|screenSize|keyboardHidden|screenLayout" />
 
         <activity
             android:name=".MicPermissionActivity"
@@ -340,7 +348,7 @@ class AutoClickListActivity : Activity() {
         adapter.notifyDataSetChanged()
     }
 }
-@@@FILE app/src/main/java/com/mohit/screenreader/Customization.kt lines=79
+@@@FILE app/src/main/java/com/mohit/screenreader/Customization.kt lines=82
 package com.mohit.screenreader
 
 import android.content.SharedPreferences
@@ -370,7 +378,10 @@ object MenuConfig {
         "line" to "Line",
         "paragraph" to "Paragraph",
         "actions" to "Actions",
-        "slider" to "Slider"
+        "slider" to "Slider",
+        "heading" to "Heading",
+        "link" to "Link",
+        "editbox" to "Edit box"
     )
 
     fun disabled(prefs: SharedPreferences, kind: String): Set<String> =
@@ -572,7 +583,7 @@ class GamingAppsActivity : Activity() {
         status.text = "Tick the apps that should use gaming mode. Apps detected as games are already ticked; untick one to turn it off."
     }
 }
-@@@FILE app/src/main/java/com/mohit/screenreader/GeminiClient.kt lines=128
+@@@FILE app/src/main/java/com/mohit/screenreader/GeminiClient.kt lines=249
 package com.mohit.screenreader
 
 import android.content.Context
@@ -700,8 +711,633 @@ object GeminiClient {
         if (sawBusy) return Result(false, "All AI models are busy or over quota right now. Please try again in a minute.")
         return Result(false, lastError)
     }
+
+    // ---- Camera pictures (live object detection and scene description) ----
+
+    private val liveModels = listOf(
+        "gemini-2.5-flash-lite",
+        "gemini-2.5-flash",
+        "gemini-flash-lite-latest",
+        "gemini-2.0-flash-lite",
+        "gemini-2.0-flash"
+    )
+
+    private val sceneModels = listOf(
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-lite",
+        "gemini-flash-latest",
+        "gemini-2.0-flash",
+        "gemini-2.0-flash-lite"
+    )
+
+    private fun tryImage(model: String, key: String, prompt: String, imageB64: String, maxTokens: Int, fast: Boolean): Attempt {
+        try {
+            val url = URL("https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent")
+            val conn = url.openConnection() as HttpURLConnection
+            conn.requestMethod = "POST"
+            conn.connectTimeout = if (fast) 8000 else 20000
+            conn.readTimeout = if (fast) 20000 else 60000
+            conn.doOutput = true
+            conn.setRequestProperty("Content-Type", "application/json")
+            conn.setRequestProperty("x-goog-api-key", key)
+            val inline = JSONObject().put("mime_type", "image/jpeg").put("data", imageB64)
+            val parts = JSONArray()
+                .put(JSONObject().put("text", prompt))
+                .put(JSONObject().put("inline_data", inline))
+            val gen = JSONObject().put("maxOutputTokens", maxTokens).put("temperature", 0.2)
+            // Answer straight away without a long "thinking" phase (only the 2.5 models know this setting).
+            if (model.startsWith("gemini-2.5")) {
+                gen.put("thinkingConfig", JSONObject().put("thinkingBudget", 0))
+            }
+            val body = JSONObject()
+                .put("contents", JSONArray().put(JSONObject().put("parts", parts)))
+                .put("generationConfig", gen)
+            conn.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
+
+            val code = conn.responseCode
+            val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+            val resp = stream?.bufferedReader()?.use { it.readText() } ?: ""
+            conn.disconnect()
+
+            if (code in 200..299) {
+                val out = StringBuilder()
+                val cands = JSONObject(resp).optJSONArray("candidates")
+                val partsOut = cands?.optJSONObject(0)?.optJSONObject("content")?.optJSONArray("parts")
+                if (partsOut != null) {
+                    for (i in 0 until partsOut.length()) {
+                        out.append(partsOut.optJSONObject(i)?.optString("text", "") ?: "")
+                    }
+                }
+                val text = out.toString().replace("*", "").replace("#", "").trim()
+                if (text.isNotEmpty()) return Attempt(true, text, false, false)
+                return Attempt(false, "The AI did not describe this picture.", true, false)
+            }
+            val apiMsg = try {
+                JSONObject(resp).getJSONObject("error").getString("message")
+            } catch (e: Exception) {
+                ""
+            }
+            return when (code) {
+                400 -> if (apiMsg.contains("API key", true)) {
+                    Attempt(false, "Your API key is not valid. Please check it in the app.", false, false)
+                } else {
+                    Attempt(false, "The request was rejected. " + apiMsg, true, false)
+                }
+                401, 403 -> Attempt(false, "Your API key was rejected. Please check it in the app.", false, false)
+                404 -> Attempt(false, "AI model " + model + " is not available.", true, false)
+                429 -> Attempt(false, "Too many requests.", true, true)
+                500, 502, 503, 504 -> Attempt(false, "The AI service is busy.", true, true)
+                else -> Attempt(false, "AI service error " + code + ". " + apiMsg, true, false)
+            }
+        } catch (e: java.net.UnknownHostException) {
+            return Attempt(false, "No internet connection.", false, false)
+        } catch (e: java.net.SocketTimeoutException) {
+            return Attempt(false, "The AI request timed out.", true, true)
+        } catch (e: Exception) {
+            return Attempt(false, "Network error. Please try again.", true, false)
+        }
+    }
+
+    class ImageResult(val ok: Boolean, val text: String, val busy: Boolean, val fatal: Boolean)
+
+    // Must be called from a background thread. fast = short live answers; otherwise a full description.
+    fun describeImage(context: Context, prompt: String, imageB64: String, fast: Boolean, maxTokens: Int): ImageResult {
+        val prefs = context.getSharedPreferences("screen_reader_prefs", Context.MODE_PRIVATE)
+        val key = prefs.getString("gemini_api_key", null)?.trim()
+        if (key.isNullOrEmpty()) {
+            return ImageResult(false, "No API key found. Open the screen reader app and choose Add API key first.", false, true)
+        }
+        val list = if (fast) liveModels else sceneModels
+        val prefName = if (fast) "gemini_last_live_model" else "gemini_last_scene_model"
+        val lastGood = prefs.getString(prefName, null)
+        val models = if (lastGood != null && list.contains(lastGood)) {
+            listOf(lastGood) + list.filter { it != lastGood }
+        } else {
+            list
+        }
+        var lastError = "Unknown error."
+        var sawBusy = false
+        for (model in models) {
+            val a = tryImage(model, key, prompt, imageB64, maxTokens, fast)
+            if (a.ok) {
+                prefs.edit().putString(prefName, model).apply()
+                return ImageResult(true, a.text, false, false)
+            }
+            lastError = a.text
+            if (a.busy) sawBusy = true
+            if (!a.next) return ImageResult(false, a.text, false, true)
+            // For the live mode one busy answer is enough: slow down instead of trying every model.
+            if (fast && a.busy) break
+        }
+        return ImageResult(false, if (sawBusy) "Too many requests or the AI is busy." else lastError, sawBusy, false)
+    }
 }
-@@@FILE app/src/main/java/com/mohit/screenreader/GestureConfig.kt lines=143
+
+@@@FILE app/src/main/java/com/mohit/screenreader/CameraLiveActivity.kt lines=503
+package com.mohit.screenreader
+
+import android.Manifest
+import android.annotation.SuppressLint
+import android.app.Activity
+import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.ImageFormat
+import android.graphics.Matrix
+import android.graphics.Rect
+import android.graphics.YuvImage
+import android.hardware.camera2.CameraCaptureSession
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraDevice
+import android.hardware.camera2.CameraManager
+import android.hardware.camera2.CaptureRequest
+import android.media.Image
+import android.media.ImageReader
+import android.os.Bundle
+import android.os.Handler
+import android.os.HandlerThread
+import android.os.Looper
+import android.util.Base64
+import android.util.Size
+import android.view.Gravity
+import android.view.Surface
+import android.view.WindowManager
+import android.widget.FrameLayout
+import android.widget.TextView
+import java.io.ByteArrayOutputStream
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+
+// Opens the back camera without showing a picture and keeps taking small snapshots of what the
+// camera sees (preview frames, no photo is taken), sends them to Gemini and speaks the answer.
+//   mode "objects": short live reports of what is in front of you, again and again.
+//   mode "scene":   one detailed description; double tap to describe again.
+class CameraLiveActivity : Activity() {
+
+    private class Frame(val b64: String, val sig: IntArray)
+
+    private lateinit var status: TextView
+    private val ui = Handler(Looper.getMainLooper())
+    private val camThread = HandlerThread("camera-frames")
+    private lateinit var camHandler: Handler
+    private val worker = Executors.newSingleThreadExecutor()
+
+    private var camera: CameraDevice? = null
+    private var session: CameraCaptureSession? = null
+    private var reader: ImageReader? = null
+    private var sensorOrientation = 90
+
+    private var mode = "objects"
+    @Volatile private var running = false
+    @Volatile private var paused = false
+    @Volatile private var describeAgain = false
+    private val wantFrame = AtomicBoolean(false)
+    private val frames = ArrayBlockingQueue<Frame>(1)
+    @Volatile private var targetLongSide = 640
+    @Volatile private var jpegQuality = 65
+
+    private var lastReport = ""
+    private var lastSig: IntArray? = null
+    private var lastUnclearAt = 0L
+    private var lastSlowAt = 0L
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        mode = intent?.getStringExtra("mode") ?: "objects"
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+
+        val root = FrameLayout(this)
+        status = TextView(this)
+        status.textSize = 22f
+        status.gravity = Gravity.CENTER
+        status.setPadding(48, 48, 48, 48)
+        status.isClickable = true
+        status.isFocusable = true
+        status.setOnClickListener { onTapped() }
+        root.addView(status, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+        setContentView(root)
+        setStatus(if (mode == "scene") "Scene description. Starting the camera."
+        else "Live object detection. Starting the camera.")
+
+        camThread.start()
+        camHandler = Handler(camThread.looper)
+
+        if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+            openCamera()
+        } else {
+            say("Camera permission is needed. Please allow it.", true)
+            requestPermissions(arrayOf(Manifest.permission.CAMERA), 7)
+        }
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+            openCamera()
+        } else {
+            say("Camera permission was not given. Closing.", true)
+            finish()
+        }
+    }
+
+    private fun setStatus(text: String) {
+        status.text = text
+        status.contentDescription = text
+    }
+
+    private fun say(text: String, flush: Boolean) {
+        MyScreenReaderService.instance?.speakExternal(text, flush)
+    }
+
+    private fun onTapped() {
+        if (mode == "scene") {
+            describeAgain = true
+        } else {
+            paused = !paused
+            val t = if (paused) "Paused. Double tap to continue." else "Continuing."
+            setStatus(t)
+            say(t, true)
+        }
+    }
+
+    // ---------------- Camera ----------------
+
+    @SuppressLint("MissingPermission")
+    private fun openCamera() {
+        try {
+            val mgr = getSystemService(CAMERA_SERVICE) as CameraManager
+            val id = mgr.cameraIdList.firstOrNull {
+                mgr.getCameraCharacteristics(it).get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_BACK
+            } ?: mgr.cameraIdList.firstOrNull()
+            if (id == null) {
+                say("This phone has no camera that can be used.", true)
+                finish()
+                return
+            }
+            val ch = mgr.getCameraCharacteristics(id)
+            sensorOrientation = ch.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
+            val map = ch.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+            val sizes = map?.getOutputSizes(ImageFormat.YUV_420_888)
+            val size = pickSize(sizes)
+            val r = ImageReader.newInstance(size.width, size.height, ImageFormat.YUV_420_888, 2)
+            r.setOnImageAvailableListener({ rd -> onImage(rd) }, camHandler)
+            reader = r
+            mgr.openCamera(id, object : CameraDevice.StateCallback() {
+                override fun onOpened(cam: CameraDevice) {
+                    camera = cam
+                    startSession(cam, r)
+                }
+
+                override fun onDisconnected(cam: CameraDevice) {
+                    cam.close()
+                    camera = null
+                    ui.post { say("The camera was disconnected.", true); finish() }
+                }
+
+                override fun onError(cam: CameraDevice, error: Int) {
+                    cam.close()
+                    camera = null
+                    ui.post { say("The camera could not be opened. Another app may be using it.", true); finish() }
+                }
+            }, camHandler)
+        } catch (e: Exception) {
+            say("The camera could not be opened.", true)
+            finish()
+        }
+    }
+
+    private fun pickSize(sizes: Array<Size>?): Size {
+        if (sizes == null || sizes.isEmpty()) return Size(640, 480)
+        // Large enough to be sharp, small enough to be fast: biggest size up to 1280 wide.
+        val ok = sizes.filter { maxOf(it.width, it.height) <= 1280 }
+        val best = ok.maxByOrNull { it.width.toLong() * it.height }
+        return best ?: sizes.minByOrNull { it.width.toLong() * it.height }!!
+    }
+
+    @Suppress("DEPRECATION")
+    private fun startSession(cam: CameraDevice, r: ImageReader) {
+        try {
+            cam.createCaptureSession(listOf(r.surface), object : CameraCaptureSession.StateCallback() {
+                override fun onConfigured(s: CameraCaptureSession) {
+                    session = s
+                    try {
+                        val req = cam.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
+                        req.addTarget(r.surface)
+                        req.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+                        req.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+                        s.setRepeatingRequest(req.build(), null, camHandler)
+                        ui.post { begin() }
+                    } catch (e: Exception) {
+                        ui.post { say("The camera could not start.", true); finish() }
+                    }
+                }
+
+                override fun onConfigureFailed(s: CameraCaptureSession) {
+                    ui.post { say("The camera could not start.", true); finish() }
+                }
+            }, camHandler)
+        } catch (e: Exception) {
+            say("The camera could not start.", true)
+            finish()
+        }
+    }
+
+    private fun begin() {
+        if (running) return
+        running = true
+        if (mode == "scene") {
+            targetLongSide = 1024
+            jpegQuality = 80
+            setStatus("Scene description. Hold the phone steady. Double tap to describe again.")
+            say("Camera ready. Hold the phone steady.", true)
+        } else {
+            targetLongSide = 640
+            jpegQuality = 65
+            setStatus("Live object detection is on. Double tap to pause or continue. Use back to close.")
+            say("Live object detection on.", true)
+        }
+        worker.execute { if (mode == "scene") sceneLoop() else objectLoop() }
+    }
+
+    // ---------------- Frames ----------------
+
+    private fun onImage(rd: ImageReader) {
+        var img: Image? = null
+        try {
+            img = rd.acquireLatestImage() ?: return
+            if (!wantFrame.getAndSet(false)) return
+            val f = makeFrame(img)
+            if (f != null) {
+                frames.clear()
+                frames.offer(f)
+            }
+        } catch (e: Exception) {
+            // skip this frame
+        } finally {
+            try {
+                img?.close()
+            } catch (e: Exception) {
+                // ignore
+            }
+        }
+    }
+
+    private fun makeFrame(img: Image): Frame? {
+        val w = img.width
+        val h = img.height
+        val planes = img.planes
+        if (planes.size < 3) return null
+        val yBuf = planes[0].buffer
+        val uBuf = planes[1].buffer
+        val vBuf = planes[2].buffer
+        val yRow = planes[0].rowStride
+        val uRow = planes[1].rowStride
+        val uPix = planes[1].pixelStride
+        val vRow = planes[2].rowStride
+        val vPix = planes[2].pixelStride
+        val nv21 = ByteArray(w * h * 3 / 2)
+        var pos = 0
+        for (row in 0 until h) {
+            yBuf.position(row * yRow)
+            yBuf.get(nv21, pos, w)
+            pos += w
+        }
+        val cw = w / 2
+        val ch = h / 2
+        for (row in 0 until ch) {
+            for (col in 0 until cw) {
+                nv21[pos++] = vBuf.get(row * vRow + col * vPix)
+                nv21[pos++] = uBuf.get(row * uRow + col * uPix)
+            }
+        }
+        val bos = ByteArrayOutputStream()
+        YuvImage(nv21, ImageFormat.NV21, w, h, null).compressToJpeg(Rect(0, 0, w, h), 90, bos)
+        val raw = bos.toByteArray()
+
+        // Shrink while decoding, then turn the picture upright and scale it to the size we send.
+        val longest = maxOf(w, h)
+        var sample = 1
+        while (longest / (sample * 2) >= targetLongSide) sample *= 2
+        val opts = BitmapFactory.Options()
+        opts.inSampleSize = sample
+        val decoded = BitmapFactory.decodeByteArray(raw, 0, raw.size, opts) ?: return null
+        val m = Matrix()
+        m.postRotate(rotationDegrees().toFloat())
+        val scale = targetLongSide.toFloat() / maxOf(decoded.width, decoded.height)
+        if (scale < 1f) m.postScale(scale, scale)
+        val upright = Bitmap.createBitmap(decoded, 0, 0, decoded.width, decoded.height, m, true)
+        if (upright !== decoded) decoded.recycle()
+
+        val out = ByteArrayOutputStream()
+        upright.compress(Bitmap.CompressFormat.JPEG, jpegQuality, out)
+
+        // A tiny 8x8 grey copy: used to notice whether the view changed at all.
+        val tiny = Bitmap.createScaledBitmap(upright, 8, 8, true)
+        val sig = IntArray(64)
+        for (i in 0 until 64) {
+            val p = tiny.getPixel(i % 8, i / 8)
+            sig[i] = ((p shr 16 and 0xFF) * 3 + (p shr 8 and 0xFF) * 6 + (p and 0xFF)) / 10
+        }
+        tiny.recycle()
+        upright.recycle()
+        return Frame(Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP), sig)
+    }
+
+    @Suppress("DEPRECATION")
+    private fun rotationDegrees(): Int {
+        val rot = when (windowManager.defaultDisplay.rotation) {
+            Surface.ROTATION_90 -> 90
+            Surface.ROTATION_180 -> 180
+            Surface.ROTATION_270 -> 270
+            else -> 0
+        }
+        return (sensorOrientation - rot + 360) % 360
+    }
+
+    private fun grabFrame(): Frame? {
+        frames.clear()
+        wantFrame.set(true)
+        val f = frames.poll(2500, TimeUnit.MILLISECONDS)
+        wantFrame.set(false)
+        return f
+    }
+
+    private fun differs(a: IntArray, b: IntArray?): Boolean {
+        if (b == null) return true
+        var sum = 0
+        for (i in a.indices) sum += Math.abs(a[i] - b[i])
+        return sum / a.size > 7
+    }
+
+    private fun pause(ms: Long) {
+        try {
+            Thread.sleep(ms)
+        } catch (e: InterruptedException) {
+            running = false
+        }
+    }
+
+    // ---------------- Loops ----------------
+
+    private val objectPrompt =
+        "You are the live eyes of a blind person who is holding a phone camera. " +
+            "Name the main objects and people directly in view, nearest and most important first, " +
+            "each with a rough position (left, right, ahead, close, far). " +
+            "Reply with ONE very short phrase of at most 12 words. No full sentences, no filler such as " +
+            "'I see' or 'the image shows', no markdown. Mention obstacles, stairs, doors, vehicles and people first. "
+
+    private fun objectLoop() {
+        val prefs = getSharedPreferences("screen_reader_prefs", MODE_PRIVATE)
+        val interval = prefs.getLong("live_interval_ms", 1800L).coerceIn(700L, 10000L)
+        pause(1200) // let focus and brightness settle
+        while (running) {
+            if (paused) {
+                pause(250)
+                continue
+            }
+            val t0 = System.currentTimeMillis()
+            val f = grabFrame()
+            if (f == null) {
+                pause(300)
+                continue
+            }
+            // Same view as the last report: save time and quota, say nothing.
+            if (!differs(f.sig, lastSig) && lastReport.isNotEmpty()) {
+                pause(300)
+                continue
+            }
+            val prompt = objectPrompt +
+                (if (lastReport.isNotEmpty()) "Previous report: \"" + lastReport + "\". " +
+                    "If nothing important has changed since the previous report, reply with exactly the one word SAME. " else "") +
+                "If the picture is too dark or blurry to tell anything, reply with exactly the one word UNCLEAR."
+            val r = GeminiClient.describeImage(this, prompt, f.b64, true, 60)
+            if (!running) break
+            if (r.ok) {
+                lastSig = f.sig
+                val t = r.text.trim()
+                val up = t.uppercase()
+                if (up == "SAME" || up.startsWith("SAME.")) {
+                    // nothing new
+                } else if (up == "UNCLEAR" || up.startsWith("UNCLEAR.")) {
+                    val now = System.currentTimeMillis()
+                    if (now - lastUnclearAt > 8000) {
+                        lastUnclearAt = now
+                        say("View unclear", true)
+                    }
+                } else {
+                    lastReport = t
+                    say(t, true)
+                }
+            } else if (r.fatal) {
+                ui.post { say(r.text, true) }
+                running = false
+                ui.post { finish() }
+                break
+            } else if (r.busy) {
+                val now = System.currentTimeMillis()
+                if (now - lastSlowAt > 20000) {
+                    lastSlowAt = now
+                    say("Too many requests. Slowing down.", true)
+                }
+                pause(6000)
+                continue
+            } else {
+                pause(1500)
+                continue
+            }
+            val spent = System.currentTimeMillis() - t0
+            if (spent < interval) pause(interval - spent)
+        }
+    }
+
+    private val scenePrompt =
+        "You are describing what is in front of a blind person who is holding a phone camera. " +
+            "In clear plain sentences that sound natural when read aloud, say: what kind of place this is " +
+            "(indoors or outdoors), the main objects and people with their positions (left, right, ahead, near, far), " +
+            "what people are doing, important colors and the lighting, any readable text (read it out), " +
+            "and anything that could be an obstacle or a danger. Start with the most important thing. " +
+            "Do not use markdown, lists or asterisks. If the picture is blurry or dark, say so and describe what you can."
+
+    private fun sceneLoop() {
+        pause(1800) // give the camera time to focus
+        var first = true
+        while (running) {
+            if (!first && !describeAgain) {
+                pause(250)
+                continue
+            }
+            first = false
+            describeAgain = false
+            ui.post { say("Describing. Please wait.", true) }
+            val f = grabFrame()
+            if (f == null) {
+                ui.post { say("No picture from the camera. Please try again.", true) }
+                continue
+            }
+            val r = GeminiClient.describeImage(this, scenePrompt, f.b64, false, 700)
+            if (!running) break
+            if (r.ok) {
+                MyScreenReaderService.instance?.speakExternalLong(r.text)
+            } else {
+                ui.post { say(r.text, true) }
+                if (r.fatal) {
+                    running = false
+                    ui.post { finish() }
+                }
+            }
+        }
+    }
+
+    // ---------------- Closing ----------------
+
+    private fun shutdown() {
+        running = false
+        wantFrame.set(false)
+        try {
+            session?.close()
+        } catch (e: Exception) {
+            // ignore
+        }
+        session = null
+        try {
+            camera?.close()
+        } catch (e: Exception) {
+            // ignore
+        }
+        camera = null
+        try {
+            reader?.close()
+        } catch (e: Exception) {
+            // ignore
+        }
+        reader = null
+    }
+
+    override fun onPause() {
+        super.onPause()
+        // While the permission question is on the screen the activity is also paused: keep it then.
+        if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+            shutdown()
+            if (!isFinishing) finish()
+        }
+    }
+
+    override fun onDestroy() {
+        shutdown()
+        try {
+            camThread.quitSafely()
+        } catch (e: Exception) {
+            // ignore
+        }
+        worker.shutdownNow()
+        super.onDestroy()
+    }
+}
+
+@@@FILE app/src/main/java/com/mohit/screenreader/GestureConfig.kt lines=145
 package com.mohit.screenreader
 
 import android.content.SharedPreferences
@@ -794,6 +1430,8 @@ object GestureConfig {
         "clear_edit" to "Clear edit box",
         "describe_screen" to "AI: Describe screen",
         "describe_image" to "AI: Describe image",
+        "scene_camera" to "AI: Scene description with camera",
+        "object_camera" to "AI: Live object detection with camera",
         "voice_typing" to "AI: Voice typing",
         "translate" to "Translate (popup)",
         "voice_assistant" to "Voice assistant (offline commands)",
@@ -1021,7 +1659,7 @@ class MicPermissionActivity : Activity() {
         finish()
     }
 }
-@@@FILE app/src/main/java/com/mohit/screenreader/MyScreenReaderService.kt lines=3385
+@@@FILE app/src/main/java/com/mohit/screenreader/MyScreenReaderService.kt lines=3520
 package com.mohit.screenreader
 
 import android.accessibilityservice.AccessibilityService
@@ -1031,6 +1669,8 @@ import android.Manifest
 import android.accessibilityservice.AccessibilityServiceInfo
 import android.accessibilityservice.GestureDescription
 import android.content.Intent
+import android.text.Spanned
+import android.text.style.URLSpan
 import android.content.pm.PackageManager
 import android.media.AudioFormat
 import android.media.AudioRecord
@@ -1115,7 +1755,7 @@ class MyScreenReaderService : AccessibilityService() {
     // ---- AI (Gemini) ----
     private val aiExecutor = Executors.newSingleThreadExecutor()
     private var aiBusy = false
-    private val aiLabels = listOf("Describe screen", "Describe image", "Voice typing", "Back")
+    private val aiLabels = listOf("Describe screen", "Describe image", "Voice typing", "Scene description with camera", "Live object detection with camera", "Back")
     private var aiIndex = 0
 
     // ---- Auto focus on new screens ----
@@ -1197,7 +1837,7 @@ class MyScreenReaderService : AccessibilityService() {
 
     // ---- Reading controls: change with swipe down-then-up / up-then-down,
     // ---- then move inside the focused item with plain swipe down / up ----
-    private val readingLabels = listOf("Normal item", "Character", "Word", "Line", "Paragraph", "Actions", "Slider")
+    private val readingLabels = listOf("Normal item", "Character", "Word", "Line", "Paragraph", "Actions", "Slider", "Heading", "Link", "Edit box")
     private var readingIndex = 0
     private var readUnits: List<String> = emptyList()
     private var readIndex = -1
@@ -1206,6 +1846,9 @@ class MyScreenReaderService : AccessibilityService() {
     // ---- Actions control + edit-box selection mode ----
     private val actionsControlIndex = 5
     private val sliderControlIndex = 6
+    private val headingControlIndex = 7
+    private val linkControlIndex = 8
+    private val editBoxControlIndex = 9
     private var actionIndex = -1
     private var selecting = false
     private var selAnchor = 0
@@ -1220,6 +1863,7 @@ class MyScreenReaderService : AccessibilityService() {
 
     override fun onServiceConnected() {
         super.onServiceConnected()
+        instance = this
         startProximity()
 
         val prefs = getSharedPreferences("screen_reader_prefs", Context.MODE_PRIVATE)
@@ -1318,6 +1962,26 @@ class MyScreenReaderService : AccessibilityService() {
         if (soundId != null && loadedSoundIds.contains(soundId)) {
             soundPool?.play(soundId, 1f, 1f, 1, 0, 1f)
         }
+    }
+
+    companion object {
+        @Volatile
+        var instance: MyScreenReaderService? = null
+    }
+
+    // Used by the camera screen to speak what the AI sees.
+    fun speakExternal(text: String, flush: Boolean) {
+        handler.post {
+            val engine = tts ?: return@post
+            lastSpoken = text
+            val params = Bundle()
+            params.putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, ttsVolume)
+            engine.speak(text, if (flush) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD, params, "x" + System.currentTimeMillis())
+        }
+    }
+
+    fun speakExternalLong(text: String) {
+        handler.post { speakLong(text) }
     }
 
     private fun speak(text: String) {
@@ -2011,6 +2675,8 @@ class MyScreenReaderService : AccessibilityService() {
             "translate" -> openTranslate()
             "voice_assistant" -> startAssistant()
             "describe_screen" -> runAi(false)
+            "scene_camera" -> openCameraAi("scene")
+            "object_camera" -> openCameraAi("objects")
             "describe_image" -> {
                 menuTarget = focusedNode ?: nodeList.getOrNull(currentIndex)
                 runAi(true)
@@ -2193,13 +2859,13 @@ class MyScreenReaderService : AccessibilityService() {
         }
     }
 
-    private fun announceCurrent() {
+    private fun announceCurrent(suffix: String = "") {
         val node = nodeList.getOrNull(currentIndex) ?: return
         focusedNode = node
         resetFocusState()
         node.performAction(AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS)
         playSound(soundFocus)
-        speak(spokenLabel(node))
+        speak(spokenLabel(node) + suffix)
     }
 
     // ======================= Sliders =======================
@@ -2398,10 +3064,90 @@ class MyScreenReaderService : AccessibilityService() {
         selecting = false
     }
 
+    // ---- Reading controls Heading / Link / Edit box: swipe down = next one, swipe up = previous one ----
+
+    private fun roleExtra(n: AccessibilityNodeInfo): String {
+        val ex = n.extras ?: return ""
+        val a = ex.getCharSequence("AccessibilityNodeInfo.roleDescription")?.toString() ?: ""
+        val b = ex.getCharSequence("AccessibilityNodeInfo.chromeRole")?.toString() ?: ""
+        return a + " " + b
+    }
+
+    private fun isHeadingNode(n: AccessibilityNodeInfo): Boolean {
+        if (Build.VERSION.SDK_INT >= 28 && n.isHeading) return true
+        val ci = n.collectionItemInfo
+        if (ci != null && ci.isHeading) return true
+        return roleExtra(n).contains("heading", true)
+    }
+
+    private fun isLinkNode(n: AccessibilityNodeInfo): Boolean {
+        if (roleExtra(n).contains("link", true)) return true
+        val cls = n.className?.toString() ?: ""
+        if (cls.contains("Link", true) && !cls.contains("Linear", true)) return true
+        val t = n.text
+        if (t is Spanned && t.length > 0 && t.getSpans(0, t.length, URLSpan::class.java).isNotEmpty()) return true
+        return false
+    }
+
+    private fun isEditBoxNode(n: AccessibilityNodeInfo): Boolean {
+        return n.isEditable || (n.className?.toString() ?: "").contains("EditText")
+    }
+
+    private fun matchesType(n: AccessibilityNodeInfo, kind: Int): Boolean = when (kind) {
+        headingControlIndex -> isHeadingNode(n)
+        linkControlIndex -> isLinkNode(n)
+        else -> isEditBoxNode(n)
+    }
+
+    private fun typeWord(kind: Int): String = when (kind) {
+        headingControlIndex -> "heading"
+        linkControlIndex -> "link"
+        else -> "edit box"
+    }
+
+    // Jumps to the next / previous heading, link or edit box. If there is none on the screen,
+    // the list is scrolled a few times to look further.
+    private fun jumpToType(kind: Int, dir: Int, attempt: Int) {
+        if (attempt == 0 && busyScrolling) return
+        syncList()
+        if (nodeList.isEmpty()) {
+            busyScrolling = false
+            playSound(soundAlert)
+            speak("No items found on this screen")
+            return
+        }
+        val cur = focusedNode
+        val fi = if (cur != null) nodeList.indexOfFirst { it == cur } else -1
+        var i = when {
+            attempt == 0 -> currentIndex + dir
+            fi >= 0 -> fi + dir
+            dir > 0 -> 0
+            else -> nodeList.size - 1
+        }
+        while (i in nodeList.indices) {
+            if (matchesType(nodeList[i], kind)) {
+                busyScrolling = false
+                currentIndex = i
+                announceCurrent(", " + typeWord(kind))
+                return
+            }
+            i += dir
+        }
+        val from = cur ?: nodeList.getOrNull(currentIndex)
+        val scroller = findVerticalScroller(from, dir)
+        if (attempt < 8 && scroller != null && scrollList(scroller, dir)) {
+            busyScrolling = true
+            handler.postDelayed({ jumpToType(kind, dir, attempt + 1) }, 700)
+            return
+        }
+        busyScrolling = false
+        fail("No " + (if (dir > 0) "next " else "previous ") + typeWord(kind))
+    }
+
     private fun changeReadingControl(dir: Int) {
         // Only the reading controls switched on in "Customize reading controls" are used.
         val off = MenuConfig.disabled(getSharedPreferences("screen_reader_prefs", Context.MODE_PRIVATE), "reading")
-        val ids = listOf("normal", "character", "word", "line", "paragraph", "actions", "slider")
+        val ids = listOf("normal", "character", "word", "line", "paragraph", "actions", "slider", "heading", "link", "editbox")
         val enabled = ids.indices.filter { it == 0 || !off.contains(ids[it]) }
         val pos = enabled.indexOf(readingIndex).let { if (it < 0) 0 else it }
         readingIndex = enabled[wrap(pos + dir, enabled.size)]
@@ -2420,6 +3166,10 @@ class MyScreenReaderService : AccessibilityService() {
 
     private fun readStep(dir: Int) {
         // Swipe up = increase, swipe down = decrease (dir is +1 for down).
+        if (readingIndex >= headingControlIndex) {
+            jumpToType(readingIndex, dir, 0)
+            return
+        }
         if (readingIndex == sliderControlIndex) {
             sliderControlStep(dir < 0)
             return
@@ -2602,6 +3352,8 @@ class MyScreenReaderService : AccessibilityService() {
                 0 -> runAi(false)
                 1 -> runAi(true)
                 2 -> beginVoiceFlow()
+                3 -> openCameraAi("scene")
+                4 -> openCameraAi("objects")
                 else -> goBack()
             }
             Mode.UNIT_CHOOSER -> beginItemSelect(SplitKind.values()[unitIndex])
@@ -3644,6 +4396,26 @@ class MyScreenReaderService : AccessibilityService() {
         speak("AI menu. Swipe left or right to change, double tap to choose. " + aiLabels[0])
     }
 
+    // Opens the camera screen (scene description or live object detection).
+    private fun openCameraAi(kind: String) {
+        val key = getSharedPreferences("screen_reader_prefs", Context.MODE_PRIVATE)
+            .getString("gemini_api_key", null)?.trim()
+        if (key.isNullOrEmpty()) {
+            fail("No API key found. Open the screen reader app and choose Add API key first.")
+            return
+        }
+        mode = Mode.NORMAL
+        menuTarget = null
+        playSound(soundActivate)
+        try {
+            startActivity(Intent(this, CameraLiveActivity::class.java)
+                .putExtra("mode", kind)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        } catch (e: Exception) {
+            fail("Could not open the camera screen.")
+        }
+    }
+
     private fun runAi(imageOnly: Boolean) {
         val prefs = getSharedPreferences("screen_reader_prefs", Context.MODE_PRIVATE)
         val key = prefs.getString("gemini_api_key", null)?.trim()
@@ -4384,6 +5156,7 @@ class MyScreenReaderService : AccessibilityService() {
     }
 
     override fun onDestroy() {
+        if (instance === this) instance = null
         prefsListener?.let {
             getSharedPreferences("screen_reader_prefs", Context.MODE_PRIVATE)
                 .unregisterOnSharedPreferenceChangeListener(it)
@@ -5419,4 +6192,4 @@ XehhiM8td5vR5qBCHY+YMfra10tTy/xgRNRrrRcNNHSbWQAecXeCqdb08bvLZTndI3VLCqEQ2ymD
 I40dle7liPR7vO1czU8olsKzCkWEl52/MBGYRU0qbsVSXODURYJtUaNw6LwLIiFB6wI/FWcJbZRM
 swaeaoenTYwaj+jMx9zsBQPwNy6K9DBNMDEwDQYJYIZIAWUDBAIBBQAEILjKwwGnepKQjMXxBdZP
 DhLirhayEya0aFKSsRRHBYXdBBQYPkjlQTH4cXmwB9zwwKolA13UHAICJxA=
-@@@END count=37
+@@@END count=38
