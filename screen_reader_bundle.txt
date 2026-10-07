@@ -1,4 +1,4 @@
-@@@BUNDLE version=21
+@@@BUNDLE version=22
 @@@FILE app/build.gradle lines=48
 apply plugin: 'com.android.application'
 apply plugin: 'kotlin-android'
@@ -1659,7 +1659,7 @@ class MicPermissionActivity : Activity() {
         finish()
     }
 }
-@@@FILE app/src/main/java/com/mohit/screenreader/MyScreenReaderService.kt lines=3612
+@@@FILE app/src/main/java/com/mohit/screenreader/MyScreenReaderService.kt lines=3642
 package com.mohit.screenreader
 
 import android.accessibilityservice.AccessibilityService
@@ -2149,9 +2149,11 @@ class MyScreenReaderService : AccessibilityService() {
             }
             for (w in extra) {
                 val t = w.type
+                val sameApp = t == AccessibilityWindowInfo.TYPE_APPLICATION &&
+                    root?.packageName != null && w.root?.packageName == root.packageName
                 if (t != AccessibilityWindowInfo.TYPE_INPUT_METHOD &&
                     t != AccessibilityWindowInfo.TYPE_SYSTEM &&
-                    t != AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY) continue
+                    t != AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY && !sameApp) continue
                 val r = w.root ?: continue
                 if (r.packageName?.toString() == packageName) continue
                 if (t != AccessibilityWindowInfo.TYPE_INPUT_METHOD) {
@@ -2186,7 +2188,7 @@ class MyScreenReaderService : AccessibilityService() {
         for (i in 0 until node.childCount) {
             val c = node.getChild(i) ?: continue
             if (!c.isVisibleToUser) continue
-            if (c.isClickable) continue // a separate control, it is its own item
+            if (clickableNode(c)) continue // a separate control, it is its own item
             val own = ownLabel(c)
             if (own != null) out.add(own) else gatherText(c, out, depth + 1)
         }
@@ -2218,7 +2220,7 @@ class MyScreenReaderService : AccessibilityService() {
                 // optional
             }
         }
-        if ((node.isClickable || tbActionable(node)) && !node.isScrollable && (own == null || own.length <= 40)) {
+        if ((clickableNode(node) || tbActionable(node)) && !node.isScrollable && (own == null || own.length <= 40)) {
             val g = mutableListOf<String>()
             gatherText(node, g, 0)
             if (g.size <= 8) {
@@ -2262,18 +2264,23 @@ class MyScreenReaderService : AccessibilityService() {
         return r != null && r.max > r.min
     }
 
+    // Can the user press this? Only real press actions count. Reading actions (move by word,
+    // line...) exist on every view that has text, so they must NOT make a plain text "pressable".
     private fun tbActionable(n: AccessibilityNodeInfo): Boolean {
         if (n.isClickable || n.isLongClickable || n.isFocusable) return true
+        return hasClickAction(n)
+    }
+
+    private fun hasClickAction(n: AccessibilityNodeInfo): Boolean {
         for (a in n.actionList) {
             val id = a.id
-            if (id == AccessibilityNodeInfo.ACTION_FOCUS ||
-                id == AccessibilityNodeInfo.ACTION_CLICK ||
-                id == AccessibilityNodeInfo.ACTION_LONG_CLICK ||
-                id == AccessibilityNodeInfo.ACTION_NEXT_AT_MOVEMENT_GRANULARITY ||
-                id == AccessibilityNodeInfo.ACTION_PREVIOUS_AT_MOVEMENT_GRANULARITY) return true
+            if (id == AccessibilityNodeInfo.ACTION_CLICK || id == AccessibilityNodeInfo.ACTION_LONG_CLICK) return true
         }
         return false
     }
+
+    // Jieshuo also treats a view that only advertises the click action as clickable.
+    private fun clickableNode(n: AccessibilityNodeInfo): Boolean = n.isClickable || hasClickAction(n)
 
     private fun tbFocusableOrClickable(n: AccessibilityNodeInfo): Boolean {
         if (!n.isVisibleToUser) return false
@@ -2335,7 +2342,7 @@ class MyScreenReaderService : AccessibilityService() {
             var p: AccessibilityNodeInfo? = n.parent
             var d = 0
             while (p != null && d < 30) {
-                if (tbShouldFocusNoChildren(p)) return false
+                if (tbShouldFocusNoChildren(p) && (ownLabel(p) != null || tbSpeaking(p) || tbGroupText(p) != null)) return false
                 p = p.parent
                 d++
             }
@@ -2395,6 +2402,13 @@ class MyScreenReaderService : AccessibilityService() {
         return b.width() >= dm.widthPixels * 9 / 10 && b.height() >= dm.heightPixels * 8 / 10
     }
 
+    // An item with no text at all is only worth a stop if it is a real control (button, switch,
+    // edit box). Empty decoration is skipped, so there are no empty "unlabeled" stops.
+    private fun isWorthFocus(n: AccessibilityNodeInfo): Boolean {
+        if (labelOf(n) != null) return true
+        return clickableNode(n) || n.isLongClickable || n.isCheckable || isEditBoxNode(n)
+    }
+
     private fun collectNodes(node: AccessibilityNodeInfo?, out: MutableList<AccessibilityNodeInfo>, inGroup: Boolean) {
         if (node == null) return
         if (!node.isVisibleToUser) return
@@ -2405,7 +2419,7 @@ class MyScreenReaderService : AccessibilityService() {
         } else if (inGroup) {
             // Inside a merged row only real controls are separate items.
             if (groupActionable(node) && (isSlider(node) || tbShouldFocus(node))) out.add(node)
-        } else if (isSlider(node) || tbShouldFocus(node)) {
+        } else if (isSlider(node) || (tbShouldFocus(node) && isWorthFocus(node))) {
             out.add(node)
         }
         for (i in 0 until node.childCount) {
@@ -2903,7 +2917,23 @@ class MyScreenReaderService : AccessibilityService() {
             val value = sliderValueOrNull(node) ?: "value unknown"
             return (label ?: "Slider") + ", slider, " + value + ", swipe up to increase, swipe down to decrease"
         }
-        return label ?: unlabeledName(node)
+        if (label != null) return label
+        val deep = mutableListOf<String>()
+        deepText(node, deep, 0)
+        if (deep.isNotEmpty()) return deep.joinToString(", ")
+        return unlabeledName(node)
+    }
+
+    // Last resort: every piece of visible text inside the item, whatever it is.
+    private fun deepText(n: AccessibilityNodeInfo, out: MutableList<String>, depth: Int) {
+        if (depth > 8 || out.size > 10) return
+        for (i in 0 until n.childCount) {
+            val c = n.getChild(i) ?: continue
+            if (!c.isVisibleToUser) continue
+            val own = ownLabel(c)
+            if (own != null) out.add(own)
+            deepText(c, out, depth + 1)
+        }
     }
 
     // For a control that has no text at all, say what kind of control it is.
